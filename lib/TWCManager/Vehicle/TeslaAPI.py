@@ -8,7 +8,7 @@ class TeslaAPI:
     carApiLastErrorTime = 0
     carApiBearerToken = ""
     carApiRefreshToken = ""
-    carApiTokenExpireTime = time.time()
+    carApiTokenExpireTime = self.time.time()
     carApiLastStartOrStopChargeTime = 0
     carApiLastChargeLimitApplyTime = 0
     lastChargeLimitApplied = 0
@@ -621,7 +621,7 @@ class TeslaAPI:
                 #   {'response': {'result': False, 'reason': 'could_not_wake_buses'}}
                 # Waiting 2 seconds seems to consistently avoid the error, but let's
                 # wait 5 seconds in case of hardware differences between cars.
-                time.sleep(5)
+                self.time.sleep(5)
 
             url = "https://owner-api.teslamotors.com/api/1/vehicles/"
             url = url + str(vehicle.ID) + "/command/charge_" + startOrStop
@@ -686,7 +686,7 @@ class TeslaAPI:
                                         + error
                                         + "' when trying to start charging.  Try again in 1 minute.",
                                     )
-                                    time.sleep(60)
+                                    self.time.sleep(60)
                                     foundKnownError = True
                                     break
                             if foundKnownError:
@@ -734,7 +734,7 @@ class TeslaAPI:
                                     # If all retries fail, we'll try again in a
                                     # minute because we set
                                     # carApiLastStartOrStopChargeTime = now earlier.
-                                    time.sleep(5)
+                                    self.time.sleep(5)
                                     continue
                                 else:
                                     # Start or stop charge failed with an error I
@@ -1290,7 +1290,7 @@ class CarApiVehicle:
                 self.lastAPIAccessTime = now
                 return True
             elif reason == "could_not_wake_buses":
-                time.sleep(5)
+                self.time.sleep(5)
                 continue
             elif apiResponseDict["response"] == None:
                 if "error" in apiResponseDict:
@@ -1309,7 +1309,7 @@ class CarApiVehicle:
                                 + error
                                 + "' when trying to set charge limit.  Try again in 1 minute.",
                             )
-                            time.sleep(60)
+                            self.time.sleep(60)
                             foundKnownError = True
                             break
                     if foundKnownError:
