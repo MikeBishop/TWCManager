@@ -1,0 +1,326 @@
+=== c66f3a2 TeslaMate's plugged_in feeds presence
+plugged_in maps to CarApiVehicle.pluggedIn (only "true"/"false";
+anything else is unknown, never unplugged). A change is pushed to
+presence from the MQTT thread, record-only like _reportLocation; the
+retained value seen on connect starts from None and is not a change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== ac3f684 Add CarApiVehicle.pluggedIn and a live-telemetry plug lookup
+A TWC unplug naming a car that live telemetry (syncSource is the
+telemetry module) says is plugged in is ignored, and such a car is never
+a candidate for a VIN-less unplug. observeTelemetryPlug records a
+telemetry plug change: plugged in -> unplugged for a HOME BLE car enters
+DEPARTING through the TWC unplug path (early BLE restore included), and
+unplugged -> plugged in for a DEPARTING car brings it HOME with an
+arrival. CarApiVehicle.pluggedIn defaults to None (unknown).
+
+Carried without its VehiclePresence part; the plug-presence tracker replaces that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 92e4748 A TWC unplug needs a plugged run before it and none in the link grace
+A Gen2 TWC reported 03 for 6 s after a restart, then a steady 00 for a
+car still plugged in, so presence saw an unplug and the car departed.
+An unplug now needs a non-00 state held for UNPLUG_DEBOUNCE right before
+the 00 began, and the 00 must begin LINK_GRACE (300 s) after the link
+(first heartbeat; a linkready re-arms it for a TWC that re-links before
+timing out).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 3739fef Power-start is plug evidence only shortly after a plug-in
+On a VIN-less TWC a power start now counts only within
+PLUG_EVIDENCE_WINDOW (300 s) of that TWC's last 00 -> plugged
+transition, so a charge resume for a car that stayed plugged in no
+longer sends a departing car home. The first heartbeat after startup
+is not a transition.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== be55c56 TWC plug evidence says whether the TWC reads VINs
+A DEPARTING car replugged into a TWC that cannot read VINs stayed
+DEPARTING (reported AWAY) while it charged. Plug evidence from a TWC
+with no departing set of its own (its debounced replug, or a power
+start on a TWC that has reported no unplug) now brings the car HOME
+and runs the arrival handler when exactly one VIN is DEPARTING. With
+several it is ambiguous and probes and location decide. A VIN-reading
+TWC is left out: its VIN query proves which car it is.
+
+Carried without its VehiclePresence part; the plug-presence tracker replaces that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== e526329 Unplug attribution: exclude idle cars elsewhere, keep plugVIN across a hold flicker
+A VIN-less unplug now also excludes other TWCs' plug-session VIN, since
+currentVIN is cleared soon after charging stops. plugVIN is no longer
+wiped when a replug hold (re)starts, so a 00 flicker keeps a VIN read
+in the new session; a sustained 00 before the hold completes clears it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 220d1bc The departure handler always queues the restore while a limit is held
+A probe's limit may be a stale telemetry value, so the handler no longer
+adopts it as hand-set. TeslaAPI reads the car live when telemetry
+disagrees with lastApplied and adopts a hand-set limit then.
+
+Carried without its VehiclePresence part; the plug-presence tracker replaces that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 0685c3f Hand-set limits are adopted by the channel, not on arrival
+TeslaAPI and TeslaBLE now read the car (or a live telemetry limit) when
+they apply a limit and adopt a hand-set one through ChargeLimitRules. The
+arrival handler's own adoption is removed; onArrival keeps its currentLimit
+parameter, unused. VehiclePresence no longer fills a telemetry limit into
+pushed arrivals (limitLookup and PresenceSources.telemetryLimit are gone;
+ChargeLimitRules.telemetryChargeLimit replaces the lookup). Departures are
+unchanged.
+
+Carried without its VehiclePresence part; the plug-presence tracker replaces that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== a4bd744 Trust NON_TESLA only on a VIN-reading TWC; localOnly safe everywhere
+An all-empty VIN answer also comes from a TWC with CAN disabled (DIP
+switch 2 down), where it says nothing about which car is plugged in.
+TWCSlave.recordPlugVIN now marks plugVIN NON_TESLA for an empty answer
+only once the TWC has reported a real VIN during this run; otherwise
+plugVIN stays None and an unplug uses the VIN-less candidate rules.
+
+Every applyChargeLimit the command queue may call directly now accepts
+localOnly: TeslaBLE ignores it, TeslaAPI does nothing and returns
+"error" (it is not a local channel; the departure handler is the remote
+fallback), and HomeAssistant ignores it through **kwargs. Without
+VehiclePriority the early restore no longer raises TypeError.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== f73ab99 The early restore on unplug is BLE only (localOnly)
+VehiclePriority fell back from TeslaBLE to TeslaAPI under prefer_ble,
+so a passing BLE failure in the early restore sent a Fleet API command,
+the cost the early restore exists to avoid. The queued restore now
+carries localOnly=True; the command queue passes it only when set (as
+remoteOnly), and VehiclePriority.applyChargeLimit with localOnly skips
+every module except TeslaBLE. If BLE fails, the saved limit is still
+held and the departure handler's remote restore is the fallback.
+
+Carried without its VehiclePresence part; the plug-presence tracker replaces that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== b85a59b Attribute an unplug to the car of this plug session, not lastVIN
+lastVIN sticks until another VIN is read, so a non-Tesla car unplugged
+after a Tesla session named that Tesla, which then became DEPARTING
+while parked. TWCSlave.plugVIN records the car of the current plug
+session: the VIN read by the VIN query, NON_TESLA when the query came
+back all empty, or None. It is cleared once the unplug is reported and
+when a replug starts. A VIN unplug names that VIN; a NON_TESLA unplug
+departs nobody; None uses the VIN-less candidate rules. lastVIN and
+currentVIN are unchanged and still give the nominations their hint.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 5455208 Add the departing handler: restore the limit over BLE on unplug
+When a TWC reports a debounced unplug, the BLE cars it may refer to
+(its VIN, or for a VIN-less TWC every HOME BLE car no other TWC
+reports) become DEPARTING, which state() reports as AWAY so policy-wide
+applies skip them. An unambiguous car gets its normal charge limit
+restored over BLE at once, while still in range, even when a remote
+channel exists (Fleet API commands cost far more); TeslaBLE reads first
+and keeps a hand-set limit. The saved limit records the outcome: after
+a successful restore the departure handler has nothing to restore, and
+after a failed one its remote restore is the fallback.
+
+While DEPARTING the thread probes BLE every PROBE_INTERVAL, for up to
+DEPARTING_PROBE_CAP (1800 s). Two failed BLE probes in a row (even if a
+location source still says home) or a location "away" make it AWAY and
+run the departure handler. A BLE contact or a location "home" does not
+end it: only plug evidence does, a TWC proof or the same TWC's replug,
+which brings its cars HOME and runs the arrival handler.
+
+Carried without its VehiclePresence part; the plug-presence tracker replaces that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== c92cef4 TWC slaves report debounced unplug and replug to presence
+Gen2 TWCs drop to state 00 briefly while still plugged in, so an unplug
+is state 00 held for UNPLUG_DEBOUNCE (60 s), and after a reported
+unplug a replug is a plugged state (01/03/08) followed by 60 s without
+00. The slave evaluates this on every heartbeat (pure bookkeeping) and
+reports it with the new record-only observers
+VehiclePresence.observeUnplug(twc, vin, excluded) and observePlug(twc),
+keyed by the TWCID in hex. The unplug carries currentVIN or lastVIN
+(None for a VIN-less TWC) and the VINs other TWCs report right now. The
+existing delayed nominations are unchanged; presence does not act on
+the new observations yet.
+
+Carried without its VehiclePresence part; the plug-presence tracker replaces that.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== aeb2488 Evidence the car is present closes TeslaBLE's circuit breaker
+A TeslaMate arrival can fire while the car is still out of BLE range;
+every BLE attempt then fails and the breaker opens, so once the car is
+really home only one attempt per recovery timeout gets through.
+
+Any BLE contact (a probe, state read or command the car answered) now
+records a breaker success for that VIN. A TWC proof (plug-in VIN read)
+resets the breaker through the new TeslaBLE.resetCircuitBreaker, called
+from the home-proof handler on the presence thread. The breaker is plain
+dicts, so the reset takes no BLE lock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== c15c818 Keep proofs and late presence checks from being undone
+An away fix queued behind a TWC proof in the same pass is dropped, like
+one that arrives during the proof hook. Nominated due times within one
+probe interval of an existing one are skipped, so a flapping TWC can't
+fill the per-VIN set and push out the 20- and 45-minute checks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== b06ab24 Re-evaluate at-home after moving the home location
+Saves the next TWC proof an extra location fetch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 425892d Arrival before the first policy evaluation queues nothing
+lastChargeLimitApplied is 0 until Policy first runs (it writes -1 when it
+has no limit), and `or -1` turned that into a restore. At startup an
+arrival that beat Policy restored and forgot each car's normal limit. The
+handler still resets the car's dedupe state, so the policy's own first
+apply reaches it, but queues nothing itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 88988ad Test depart-then-return through the real handlers and queue
+Drives HOME -> AWAY -> HOME through VehiclePresence with the default
+arrival/departure handlers and a real VehicleCommandQueue whose worker is
+started only at the end. The pending remote-only restore is replaced by
+the arrival apply under the same (cmd, vin) key, and the module receives
+exactly one applyChargeLimit(limit=policy, vin) and no restore.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 0b92117 Treat a TWC-reported VIN as proof of home, owned by presence
+recordVehicleVIN runs on the serial main loop and called
+TeslaAPI.vehicleIsDefinitelyHome, which fetches the car's location over
+the Fleet API or BLE. It now only records VehiclePresence.observeProof(
+vin, "twc"): the car is set home at once (failed probes reset) and the
+arrival handler runs. The separate nominate is dropped; the proof already
+gives HOME and the arrival apply, and a probe in the same pass could only
+agree or, on a bad geofence or stale fix, undo the arrival.
+
+The geofence repair moves to the presence thread. On a TWC proof it calls
+an injected home-proof hook outside the lock; the default calls
+TeslaAPI.reconcileHomeLocation (renamed from vehicleIsDefinitelyHome),
+which keeps the fetch, the 600 s stale-fix check, the home move and the
+sunrise/saveSettings tasks, reads the raw location answer and no longer
+sets atHome. An away fix recorded for that VIN during the hook (its own
+fetch, before home moved) is dropped, since the car is plugged in.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 1454bdb VehiclePresence: bound observations and due times without the thread
+In non-master modes the presence thread never starts, but TeslaMate and
+the HTTP API still record observations and nominations, and nothing
+drained them. Observations now live in a deque that keeps the newest
+MAX_OBSERVATIONS, and each VIN's due times keep only the earliest
+MAX_DUE_PER_VIN. Recording still happens before start(), so the first
+pass after startup sees retained telemetry; with the thread running both
+drain every pass and the limits are not reached.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== ca95fed TeslaBLE: policy-wide apply skips cars presence says are away
+After a car left, the policy re-queued its limit every 30 s and BLE spent
+about 30 s per tick retrying and waking a car it could not reach. The
+vin=None apply now skips any VIN VehiclePresence reports as away and
+counts it as skipped, so an all-away tick returns True and does not push
+VehiclePriority into fallback. A per-VIN apply (arrival) is never skipped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 050a767 Make CarApiVehicle.atHome defer to VehiclePresence
+atHome is now a property. Writers still assign it, which records the raw
+location-derived answer in _locationAtHome. Readers get presence's answer
+when it is home or away and the raw answer otherwise, so the TeslaAPI
+gates, the wake gate and the at-home counts follow presence without call
+site changes. A telemetry-synced car that has left is no longer commanded
+by the policy-wide apply on a stale atHome.
+
+Everything that feeds or checks the location fix itself reads the raw
+value: apiSource, CarApiVehicle._reportLocation (otherwise presence would
+read its own state back), vehicleIsDefinitelyHome and the status deferral
+in update_vehicle_data. The policy-wide apply also no longer asks to wake
+cars on behalf of an away car it will skip.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+=== 9f68869 Drive VehiclePresence from TWC events, telemetry and the API
+TWC power starts, power drops, unplugs and recorded VINs nominate
+presence checks; telemetry position updates are observed as they
+arrive (skipped when home or coordinates are unset). The
+checkArrival/checkDeparture background tasks are gone and the HTTP
+endpoints nominate instead. The presence thread starts after the
+vehicle queue as a real master and stops first at shutdown.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+=== a485369 Add arrival and departure handlers for VehiclePresence
+Arrival resets the vehicle's dedupe state, adopts a hand-set limit as
+its new normal, and queues the policy limit for that VIN. Departure
+queues a remote-only restore when the Fleet API can deliver it (loaded,
+has a token, and policy allows it), and otherwise logs once; failed
+restores are dropped, never replayed.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+=== 50f02ed Track BLE proof per VIN so API-only cars are never declared away by BLE
+TeslaBLE records bleProven on any successful contact. bleSource counts an
+unreachable probe toward away only for a proven VIN; otherwise the source
+does not apply.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+=== 38767e9 Presence sources: add request timeout, skip non-BLE VINs, no guess without home
+vehicleOnlineStates times out after 30s so a stalled connection cannot
+hang the presence thread. bleSource does not apply to a VIN BLE is not
+configured for, which would otherwise be inferred as away. Telemetry and
+API sources give no answer while home is unset.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+=== 5f783ac Add presence sources: telemetry, BLE probe and online-only API
+Each source answers home/away (and the current limit when it can read
+one) without waking the car. The API source checks the vehicle list
+for online status before reading location, and TeslaAPI now reports
+every location it reads to VehiclePresence. vehicle.presenceSources
+sets the order.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+=== 4c7e737 Harden VehiclePresence passes against bad inputs
+A knownVehicles() failure no longer drops the pass's observations and
+named VINs, a home location fix resets the failed-probe count, and a
+malformed source result falls through like a failing source.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+=== dc7518f Add VehiclePresence: per-VIN home/away tracking on its own thread
+Observers record from any thread; one daemon thread probes due VINs
+through injected sources, applies the decision rules under a lock, and
+runs the arrival/departure handlers without it. Sources and handlers
+are wired in the next tasks.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+=== b712d53 Add a BLE presence probe that never wakes the car
+probePresence runs body-controller-state once under the BLE lock; it
+talks to VCSEC only, so it answers while infotainment sleeps. Every
+BLE command, state read and probe now reports whether the car answered
+to VehiclePresence.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+

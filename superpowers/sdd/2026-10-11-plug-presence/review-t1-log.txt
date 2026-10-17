@@ -1,0 +1,30 @@
+c66f3a2 TeslaMate's plugged_in feeds presence
+ac3f684 Add CarApiVehicle.pluggedIn and a live-telemetry plug lookup
+92e4748 A TWC unplug needs a plugged run before it and none in the link grace
+3739fef Power-start is plug evidence only shortly after a plug-in
+be55c56 TWC plug evidence says whether the TWC reads VINs
+e526329 Unplug attribution: exclude idle cars elsewhere, keep plugVIN across a hold flicker
+220d1bc The departure handler always queues the restore while a limit is held
+0685c3f Hand-set limits are adopted by the channel, not on arrival
+a4bd744 Trust NON_TESLA only on a VIN-reading TWC; localOnly safe everywhere
+f73ab99 The early restore on unplug is BLE only (localOnly)
+b85a59b Attribute an unplug to the car of this plug session, not lastVIN
+5455208 Add the departing handler: restore the limit over BLE on unplug
+c92cef4 TWC slaves report debounced unplug and replug to presence
+aeb2488 Evidence the car is present closes TeslaBLE's circuit breaker
+c15c818 Keep proofs and late presence checks from being undone
+b06ab24 Re-evaluate at-home after moving the home location
+425892d Arrival before the first policy evaluation queues nothing
+88988ad Test depart-then-return through the real handlers and queue
+0b92117 Treat a TWC-reported VIN as proof of home, owned by presence
+1454bdb VehiclePresence: bound observations and due times without the thread
+ca95fed TeslaBLE: policy-wide apply skips cars presence says are away
+050a767 Make CarApiVehicle.atHome defer to VehiclePresence
+9f68869 Drive VehiclePresence from TWC events, telemetry and the API
+a485369 Add arrival and departure handlers for VehiclePresence
+50f02ed Track BLE proof per VIN so API-only cars are never declared away by BLE
+38767e9 Presence sources: add request timeout, skip non-BLE VINs, no guess without home
+5f783ac Add presence sources: telemetry, BLE probe and online-only API
+4c7e737 Harden VehiclePresence passes against bad inputs
+dc7518f Add VehiclePresence: per-VIN home/away tracking on its own thread
+b712d53 Add a BLE presence probe that never wakes the car

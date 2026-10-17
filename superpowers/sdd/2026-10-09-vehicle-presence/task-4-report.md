@@ -1,0 +1,3 @@
+# Task 4 report
+Status: DONE_WITH_CONCERNS. Implemented per brief verbatim (probePresence, _reportContact, _sendCommand_locked/_fetch_state_locked wrappers, presenceProbeTimeout). 13 tests added; full suite 558 passed, 1 warning; black clean. CommandRecorder and json import from Task 3 are now both used.
+Concerns: (1) wrappers report unreachable for any None result, including non-contact failures (invalid args, missing binary, unknown VIN, state JSON parse error on a reachable car). (2) probePresence early returns (no binary/unknown VIN) do not report contact. (3) I wrote the implementation before the tests (not strict red-first).
