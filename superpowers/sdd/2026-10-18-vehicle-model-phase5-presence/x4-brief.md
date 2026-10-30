@@ -1,0 +1,4 @@
+# Task X4: leftovers (audit A7 + A8 + A9, ≈ −36)
+Source of truth: /home/mbishop/github/TWCManager/.claude/worktrees/ble-threading-twcmanager-62cb96/.superpowers/sdd/2026-10-18-vehicle-model-phase5-presence/audit-report.md, findings **A7**, **A8**, **A9**. A7 changes update_charge's return contract: lib ignores it; rewrite test_reads_no_wake.py asserts to check the observable effect (no wake, no paid read) rather than the return value; don't loosen what they prove.
+Base: branch vehicle-model/phase5 in the wt-vm5 worktree. No behaviour change: tests/unit + tests/EMS stay green; tests/unit/test_command_path_parity.py counts and timings untouched. Comment rule applies (why, not history; no phase/PR/ruling IDs). Report the lib delta (git diff --shortstat <BASE> -- lib, net) against the estimate; if you can't reach the estimate, say which item fell short and why.
+Commit: "Remove read and settings-key leftovers"

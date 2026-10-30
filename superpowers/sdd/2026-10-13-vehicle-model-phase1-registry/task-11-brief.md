@@ -46,14 +46,14 @@ def test_vin_keyed_telemetry_creates_registry_vehicle_and_observes_with_source()
     t, reg = make(); t.vinFor = lambda vid: VIN
     t.applyDataToVehicle("1", "charge_limit_soc", "80")      # before the name: parked
     assert reg.vehicles() == [] and t.unknownVehicles["1"] == [["charge_limit_soc", "80"]]
-    t.applyDataToVehicle("1", "display_name", "TestCar")   # maps and replays at once
+    t.applyDataToVehicle("1", "display_name", "<car>")   # maps and replays at once
     v = reg.get(VIN)
-    assert v.name == "TestCar" and t.vehicles["1"] is v
+    assert v.name == "<car>" and t.vehicles["1"] is v
     assert (v.latest("chargeLimit").value, v.latest("chargeLimit").source) == (80, "Probe")
 
 def test_name_match_against_registry_without_cloud_list():
-    t, reg = make(); reg.getOrCreate(VIN, "TeslaBLE").observe("name", "TestCar", "TeslaAPI")
-    assert t.updateVehicles("1", "TestCar", loadList=False) is True
+    t, reg = make(); reg.getOrCreate(VIN, "TeslaBLE").observe("name", "<car>", "TeslaAPI")
+    assert t.updateVehicles("1", "<car>", loadList=False) is True
     assert t.vehicles["1"] is reg.get(VIN)
 
 def test_unidentifiable_car_is_parked_and_never_raises():   # Review Focus 4
@@ -68,7 +68,7 @@ def test_task9_legacy_sync_names_are_gone():
 
 def test_connection_state_is_the_feed_liveness():
     t, reg = make(); t.vinFor = lambda vid: VIN
-    t.applyDataToVehicle("1", "display_name", "TestCar"); v = reg.get(VIN)
+    t.applyDataToVehicle("1", "display_name", "<car>"); v = reg.get(VIN)
     v.observe("chargeLimit", 50, "Probe", at=0.0)
     assert reg.sourceLiveAt("Probe") is None and v.age("chargeLimit") > 1e6     # not connected yet
     t.mqttConnect(None, None, None, 0)

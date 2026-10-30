@@ -16,7 +16,7 @@
   - Arithmetic: +6 characterization tests (the carry-in Targets test is one of them), +2 forget tests, +3 interface tests, −4 deleted tests (below).
   - Recount: 1773 + 6 + 2 + 3 − 4 = 1780.
 - `tests/integration --collect-only`: 212 collected.
-- `tests/API --collect-only` **hangs**. These files do module-level HTTP calls to 127.0.0.1:8088, so this is pre-existing and not caused by this task. None of them imports anything from `TWCManager`, which I checked with grep.
+- `tests/API --collect-only` **hangs**. These files do module-level HTTP calls to <teslamate-host>:8088, so this is pre-existing and not caused by this task. None of them imports anything from `TWCManager`, which I checked with grep.
 - Step 5 greps:
   - The removed-names grep over `lib html tests/integration tests/API docs` gives 0 hits.
   - `git grep "\.forget(" -- lib` gives only `HTTPControl.py:121 forget(vin, ifUnattached=True)`.

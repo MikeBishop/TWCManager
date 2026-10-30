@@ -1,0 +1,5 @@
+# Phase 4 follow-up (user-approved, 2026-10-17)
+1. Revert commit ef1c8fc5 ("publish amps_offered/amps_desired only on change") with `git revert`: MQTTStatus drops (not defers) publishes within its ratelimit (default 60 s), so publish-on-change leaves ampsOffered/ampsDesired stale; per-pass publishing restores BASE behaviour. Remove/adjust only the tests that commit added.
+2. TWCMaster.withdrawOffers: reword its comment so it doesn't overclaim — Gen2 TWCs get a 0 offer (idle minimum) and Gen3 units a 0 target; a car that carries its own rate (vehicle-only) keeps its last commanded rate (only the AMPS desire is cleared).
+3. Replace the `# (a)`–`# (h)` tags in tests/unit/test_control_tick.py (lines ~67, 74, 86, 156, 171, 462, 484) with a plain statement of the behaviour each test pins (e.g. `# (e)` → `# The wiring cap applies to every offer, not just changed ones`). No other changes. Then update pr-notes.md (same directory) so each intended change names its test(s) instead of a letter tag.
+Comment rule applies (global-constraints.md). Full suite green; parity unchanged; black on changed lib files.

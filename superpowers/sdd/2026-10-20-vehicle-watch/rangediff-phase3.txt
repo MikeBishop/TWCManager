@@ -1,0 +1,3084 @@
+ 1:  76e3ac54 !  1:  28aff578 Add the desired-state store and VIN-keyed held charge limits
+    @@ Commit message
+      ## CHANGELOG.md ##
+     @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+      * Architecture
+    -     * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used read-only
+    +     * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used for reads, and for commands only to vehicles Tesla reports with `command_signing: off`
+          * (@MikeBishop) - Saved Tesla tokens migrate to separate Owner and Fleet settings on first start; downgrading afterwards loses the Owner API token (#692)
+     +    * (@MikeBishop) - Held charge limits (the limit a car had before TWCManager changed it) migrate from settings `chargeLimits` to `heldLimits`, keyed by VIN, on first start; downgrading afterwards loses them, and upgrading again after a downgrade uses the held limits saved before the downgrade (the older release's `chargeLimits` is kept but ignored, with a warning)
+          * (@MikeBishop) - TWC abstraction layer with EVSEController/EVSEInstance interface (ported from #483)
+    @@ tests/unit/test_vehicles_page.py: from unittest.mock import Mock
+      from TWCManager.Control.HTTPControl import (
+          ageText,
+     @@ tests/unit/test_vehicles_page.py: def master():
+    -     v.observe("name", "<car>", "TeslaAPI")
+    +     v.observe("name", "TestCar", "TeslaAPI")
+          v.claim("TeslaBLE", True, "paired")
+          reg.beginPlugSession("8244")
+     -    return SimpleNamespace(
+ 2:  cb3baa29 !  2:  b146c694 Run vehicle commands as classified provider outcomes on BLE and cloud workers
+    @@ lib/TWCManager/Vehicle/Providers/Suppressions.py: class Suppressions:
+     
+      ## lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py ##
+     @@
+    - # and wake, so it reads only when the Owner slot cannot (slotFor("read")), and
+    - # it alone commands and wakes. Neither does I/O to answer ready or available.
+    + # each vehicle_data, command and wake, so it reads only when the Owner slot
+    + # cannot (slotFor("read")). Neither does I/O to answer ready or available.
+      # Both read the energy site's Wall Connector VINs for free, Owner first.
+     +import time
+      from typing import Dict, Optional, Tuple
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py
+      from .Capability import (
+          CLOUD_FREE,
+          COMMANDS,
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: WALL_CONNECTOR_VINS = Declaration(CLOUD_FREE, RateLimit(2, 60))
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: TESLA_COMMAND = {
+      
+      
+      class OwnerAPIProvider(Provider):
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Pr
+     -        if not car:
+     -            return False
+     -        return bool(self.carapi.setChargeRate(int(amps), vehicle=car))
+    --
+    ++    # Command methods: one billed request each (set_charging_amps below 5 A
+    ++    # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    ++    # the lane wakes first when the attempt says so.
+    + 
+     -    def wake(self, vin: str) -> bool:
+     -        car = self.carapi.getVehicleByVIN(vin)
+     -        if not car:
+     -            return False
+     -        return bool(self.carapi.wakeVehicle(car))
+    -+    # Command methods: one billed request each (set_charging_amps below 5 A
+    -+    # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    -+    # the lane wakes first when the attempt says so.
+    -+
+     +    # The clock passed to the wake hold; a test may replace it
+     +    clock = time.time
+     +
+    @@ lib/TWCManager/VehicleCommandQueue.py
+      #
+     -# Pending commands coalesce per (cmd, vin): a later command for the same
+     -# vehicle (or the same vehicle-less "all cars" target) replaces the pending
+    --# one. Stop-charging commands run before anything else. cancel() lets the
+    --# master drop pending entries that a newer decision has made moot.
+    +-# one. A charge command without a vin applies to every car, so it replaces,
+    +-# and is replaced by, any pending charge command. Stop-charging commands run
+    +-# before anything else. cancel() lets the master drop pending entries that a
+    +-# newer decision has made moot.
+     +# Pending entries coalesce per key: a later entry with the same key replaces
+     +# the pending one. High entries (stops) run before anything else. remove()
+     +# lets a caller drop pending entries that a newer decision has made moot. At
+     +# shutdown, close() drops the rest and waitDrained() lets the stops finish.
+    -+#
+    + #
+    +-# A car gets at most one charge start/stop attempt per
+    +-# CHARGE_COMMAND_INTERVAL. Callers re-request every loop while they want a
+    +-# change, so a refused command isn't retried back to back.
+     +# Two kinds of instance: the legacy one (run=None) dispatches command dicts
+     +# to the vehicle module (normally VehiclePriority) until Task 13; the
+     +# attempt workers (Vehicle/Reconcile/Run.py) pass their own run, key, isHigh,
+     +# report and lost. Every entry such an instance accepts is reported exactly
+     +# once, through report or lost. Callbacks never run under _cond.
+    ++#
+    ++# Legacy charge commands: one without a vin applies to every car, so it
+    ++# replaces, and is replaced by, any pending charge command. A car gets at
+    ++# most one charge start/stop attempt per CHARGE_COMMAND_INTERVAL. Callers
+    ++# re-request every loop while they want a change, so a refused command isn't
+    ++# retried back to back.
+      import collections
+      import threading
+    -+import time
+    - import traceback
+    - 
+    - from TWCManager.Logging.LoggerFactory import LoggerFactory
+    + import time
+     @@ lib/TWCManager/VehicleCommandQueue.py: def _setAmps(module, task):
+      
+      
+      class VehicleCommandQueue:
+     +    MAX_PENDING = 64
+    -+
+    +     CHARGE_COMMAND_INTERVAL = 60
+    + 
+          _DISPATCH = {
+    -         "charge": lambda module, task: module.car_api_charge(task),
+    -         "applyChargeLimit": lambda module, task: module.applyChargeLimit(
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+              "setAmps": lambda module, task: _setAmps(module, task),
+          }
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+     +        self._running = None
+              self._draining = False
+              self._thread = None
+    +-        # Per-VIN (None: every car) time of the last charge attempt
+     +        # The worker thread is between start() and its exit
+     +        self._live = False
+     +        self._overflowWarned = False
+    ++        # Legacy: per-VIN (None: every car) time of the last charge attempt
+    +         self._lastChargeTime = {}
+      
+          @staticmethod
+    -     def _key(task):
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    + 
+    +     @staticmethod
+    +     def _replaces(key, other):
+    +-        # A charge command for every car (vin None) and one for a single car
+    +-        # overlap, so the newer one replaces the older.
+    ++        # A legacy charge command for every car (vin None) and one for a
+    ++        # single car overlap, so the newer one replaces the older.
+    +         if key[0] != "charge" or other[0] != "charge":
+    +             return key == other
+    +         return key[1] is None or other[1] is None or key[1] == other[1]
+    + 
+    ++    def _chargeHeld(self, key):
+    ++        # Legacy: True while this charge command's car (or any car, for a
+    ++        # vehicle-less command) had a charge attempt within the interval
+    ++        since = time.monotonic() - max(
+    ++            (
+    ++                t
+    ++                for k, t in self._lastChargeTime.items()
+    ++                if self._replaces(key, ("charge", k))
+    ++            ),
+    ++            default=float("-inf"),
+    ++        )
+    ++        return since < self.CHARGE_COMMAND_INTERVAL
+    ++
+    +     @staticmethod
+    +     def _is_high_priority(task):
+              return task["cmd"] == "charge" and "charge" in task and not task["charge"]
+      
+          def start(self):
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+     -                if self._draining and not high:
+     -                    logger.debug("Shutting down; dropping vehicle command %r", task)
+     -                    return
+    +-                if key[0] == "charge" and not self._draining:
+    +-                    since = time.monotonic() - max(
+    +-                        (
+    +-                            t
+    +-                            for k, t in self._lastChargeTime.items()
+    +-                            if self._replaces(key, ("charge", k))
+    +-                        ),
+    +-                        default=float("-inf"),
+    +-                    )
+    +-                    if since < self.CHARGE_COMMAND_INTERVAL:
+    +-                        logger.debug(
+    +-                            "Not sending %r; last charge command %ds ago",
+    +-                            task,
+    +-                            since,
+    +-                        )
+    +-                        return
+    +-                table = self._high if high else self._low
+    +-                for pending in (self._high, self._low):
+    +-                    for k in [k for k in pending if self._replaces(key, k)]:
+    +-                        # The same key in the same table keeps its place
+    +-                        if not (pending is table and k == key):
+    +-                            del pending[k]
+    +-                table[key] = (task, callback)
+    +-                self._cond.notify_all()
+    +-        except Exception:
+    +-            logger.error("Failed to queue vehicle command: %s", traceback.format_exc())
+     +            key, high = self._keyOf(entry), bool(self._isHigh(entry))
+     +        except Exception as e:
+     +            self._logFailure("key", e)
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+     +                # a stop a worker can still run is taken
+     +                losers.append((entry, "dropped"))
+     +                accepted = False
+    ++            elif (
+    ++                self._legacy
+    ++                and key[0] == "charge"
+    ++                and not self._draining
+    ++                and self._chargeHeld(key)
+    ++            ):
+    ++                logger.debug("Not sending %r; a charge command went recently", entry)
+    ++                losers.append((entry, "dropped"))
+    ++                accepted = False
+     +            elif self.inline:
+     +                self._running, self._busy = entry, True
+     +            else:
+    -                 table, other = (
+    -                     (self._high, self._low) if high else (self._low, self._high)
+    -                 )
+    --                other.pop(key, None)
+    --                table[key] = (task, callback)
+    --                self._cond.notify_all()
+    --        except Exception:
+    --            logger.error("Failed to queue vehicle command: %s", traceback.format_exc())
+    ++                table, other = (
+    ++                    (self._high, self._low) if high else (self._low, self._high)
+    ++                )
+    ++                replaces = self._replaces if self._legacy else (lambda a, b: a == b)
+     +                for t in (other, table):
+    -+                    if key in t:
+    -+                        losers.append((t[key][0], "replaced"))
+    -+                        if t is other:
+    -+                            del t[key]
+    ++                    for k in [k for k in t if replaces(key, k)]:
+    ++                        losers.append((t[k][0], "replaced"))
+    ++                        if t is other or k != key:
+    ++                            del t[k]
+     +                if (
+     +                    key not in table
+     +                    and len(self._high) + len(self._low) >= self.MAX_PENDING
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+     +        if accepted and self.inline:
+     +            self._runOne(entry, callback)
+     +        return accepted
+    - 
+    --    def cancel(self, cmd, match):
+    --        # Drop pending (not running) entries for `cmd` whose task satisfies
+    --        # `match`. Returns how many were removed. The running entry is left
+    --        # alone: it may already be talking to the car.
+    --        removed = 0
+    ++
+     +    def remove(self, match) -> int:
+     +        # Pending (not running) entries for which match is true. The running
+     +        # entry is left alone: it may already be talking to the car.
+     +        losers = []
+    ++        with self._cond:
+    ++            for table in (self._high, self._low):
+    ++                for key in [k for k, (e, _) in table.items() if match(e)]:
+    ++                    losers.append((table.pop(key)[0], "cancelled"))
+    ++        if losers:
+    ++            logger.debug("%s: cancelled %d pending command(s)", self.name, len(losers))
+    ++        self._lose(losers)
+    ++        return len(losers)
+    + 
+    +     def cancel(self, cmd, match):
+    +-        # Drop pending (not running) entries for `cmd` whose task satisfies
+    +-        # `match`. Returns how many were removed. The running entry is left
+    +-        # alone: it may already be talking to the car. Stops are kept during
+    +-        # shutdown, which must send them.
+    +-        removed = 0
+    ++        # Legacy: until Task 13. Stops are kept during shutdown, which must
+    ++        # send them.
+    ++        return self.remove(
+    ++            lambda task: task["cmd"] == cmd
+    ++            and match(task)
+    ++            and not (self._draining and self._is_high_priority(task))
+    ++        )
+    ++
+    ++    def pending(self) -> int:
+              with self._cond:
+    -             for table in (self._high, self._low):
+    +-            tables = (self._low,) if self._draining else (self._high, self._low)
+    +-            for table in tables:
+     -                doomed = [
+     -                    key
+     -                    for key, (task, _) in table.items()
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+     -        if removed:
+     -            logger.debug("Cancelled %d pending %s command(s)", removed, cmd)
+     -        return removed
+    -+                for key in [k for k, (e, _) in table.items() if match(e)]:
+    -+                    losers.append((table.pop(key)[0], "cancelled"))
+    -+        if losers:
+    -+            logger.debug("%s: cancelled %d pending command(s)", self.name, len(losers))
+    -+        self._lose(losers)
+    -+        return len(losers)
+    ++            return len(self._high) + len(self._low)
+      
+     -    def drain_high_priority(self, timeout):
+    -+    def cancel(self, cmd, match):
+    -+        # Legacy: until Task 13
+    -+        return self.remove(lambda task: task["cmd"] == cmd and match(task))
+    -+
+    -+    def pending(self) -> int:
+    -+        with self._cond:
+    -+            return len(self._high) + len(self._low)
+    -+
+     +    @property
+     +    def busy(self) -> bool:
+     +        with self._cond:
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+     +                self._cond.notify_all()
+     +                return None
+                  table = self._high if self._high else self._low
+    --            _, entry = table.popitem(last=False)
+    +-            key, entry = table.popitem(last=False)
+    +-            if key[0] == "charge":
+    ++            key, (entry, callback) = table.popitem(last=False)
+    ++            if self._legacy and key[0] == "charge":
+    +                 self._lastChargeTime[key[1]] = time.monotonic()
+     -            self._busy = True
+     -            return entry
+    -+            _, (entry, callback) = table.popitem(last=False)
+     +            self._running, self._busy = entry, True
+     +            if not self._high and not self._low:
+     +                # The backlog has cleared: the next overflow warns again
+    @@ tests/unit/test_teslaapi_providers.py: def test_fleet_commands_resolve_the_car_b
+      
+      def test_read_source_passes_its_slot_to_the_car():
+     
+    + ## tests/unit/test_teslaapi_readonly_gate.py ##
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: error (which would back off reads too). Reads still run.
+    + """
+    + 
+    + import logging
+    ++import time
+    + import re
+    + from unittest.mock import Mock
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +     ):
+    +         api, vehicle = owner_car("off")
+    +         vehicle.lastAPIAccessTime = 0  # not known to be awake
+    +-        vehicle.firstChargeNeededTime = 1  # pre-wake hold long over
+    ++        # A live charge need whose pre-wake hold is long over
+    ++        vehicle.firstChargeNeededTime = 1
+    ++        vehicle.lastChargeNeededTime = time.time()
+    +         requests_mock.get(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001", json={"response": {"state": "asleep"}}
+    +         )
+    +
+      ## tests/unit/test_teslaapi_token_slots.py ##
+     @@ tests/unit/test_teslaapi_token_slots.py: def test_owner_401_clears_owner_and_next_read_uses_fleet(
+          assert owner not in caplog.text and fleet not in caplog.text
+ 3:  b35bc3fa !  3:  04a66f21 Declare provider capabilities, costs and suppressions as tables
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Capability import (
+      
+      # Tesla's published per-vehicle command limit; declared, not enforced
+      FLEET_COMMAND_LIMIT = RateLimit(50, 60)
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Provider):
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: TESLA_COMMAND = {
+    + 
+    + 
+    + class OwnerAPIProvider(Provider):
+    +-    # Declares no commands: the inherited command methods answer UNSUPPORTED
+    ++    # Commands only a car Tesla lists with command_signing "off": free, but
+    ++    # paced as Fleet (OWNER_COMMAND). The inherited command methods answer
+    ++    # UNSUPPORTED; the legacy module sends through commandSlotFor
+          name = "OwnerAPI"
+          rank = 4
+          local = False
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Pr
+     +        READ_ONLINE: Declaration(CLOUD_FREE),
+     +        READ_CHARGE: Declaration(CLOUD_FREE),
+     +        READ_LOCATION: Declaration(CLOUD_FREE),
+    ++        SET_CHARGE_LIMIT: Declaration(OWNER_COMMAND),
+    ++        START_CHARGING: Declaration(OWNER_COMMAND),
+    ++        STOP_CHARGING: Declaration(OWNER_COMMAND),
+    ++        SET_AMPS: Declaration(OWNER_COMMAND),
+    ++        WAKE: Declaration(OWNER_COMMAND),
+     +        READ_WALL_CONNECTOR_VINS: WALL_CONNECTOR_VINS,
+     +    }
+     +    SUPPRESSED = CLOUD_SUPPRESSED
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Pr
+     -            capability: Declaration(CLOUD_FREE)
+     -            for capability in (READ_LIST, READ_ONLINE, READ_CHARGE, READ_LOCATION)
+     -        }
+    +-        declared.update(
+    +-            {capability: Declaration(OWNER_COMMAND) for capability in COMMANDS}
+    +-        )
+     -        declared[READ_WALL_CONNECTOR_VINS] = WALL_CONNECTOR_VINS
+     -        return declared
+     -
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              if outcome is None:
+                  state = response.get("state", "")
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -         if self.refuseCommandIfReadOnly("wake_up"):
+    -             return False
+    -         slot = self.slotFor("command")
+    --        if slot is None:
+    -+        if slot is None or not slot.usable("wake"):
+    +         if self.refuseCommandFor(vehicle, "wake_up"):
+                  return False
+    +         slot = self.commandSlotFor(vehicle)
+    ++        if slot is self.fleetSlot and not slot.usable("wake"):
+    ++            # Tesla refused a wake with this token (403); an Owner refusal is
+    ++            # noted per car instead
+    ++            return False
+              apiResponseDict = None
+              vehicle.lastAPIAccessTime = time.time()
+    +         # Anchors the post-wake check window and retry delay.
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                      # We're explicitly being told to back off
+                      self.errorCount = max(30, self.errorCount)
+    @@ tests/unit/test_provider_tables.py (new)
+     +    assert byName["Gen3TWC"].declarations() == dict(passive((C.READ_PLUG, C.READ_AMPS), C.LOCAL), **{c: D(C.LOCAL) for c in (C.SET_AMPS, C.START_CHARGING, C.STOP_CHARGING)})
+     +    assert byName["TeslaBLE"].declarations() == {c: D(C.LOCAL) for c in (C.READ_CHARGE, C.READ_LOCATION, C.READ_PLUG, C.READ_ONLINE, C.SET_CHARGE_LIMIT, C.START_CHARGING, C.STOP_CHARGING, C.SET_AMPS, C.WAKE)}
+     +    wcv = D(C.CLOUD_FREE, C.RateLimit(2, 60))
+    -+    assert byName["OwnerAPI"].declarations() == dict({c: D(C.CLOUD_FREE) for c in (C.READ_LIST, C.READ_ONLINE, C.READ_CHARGE, C.READ_LOCATION)}, **{C.READ_WALL_CONNECTOR_VINS: wcv})
+    ++    assert byName["OwnerAPI"].declarations() == dict({c: D(C.CLOUD_FREE) for c in (C.READ_LIST, C.READ_ONLINE, C.READ_CHARGE, C.READ_LOCATION)}, **{c: D(C.OWNER_COMMAND) for c in C.COMMANDS}, **{C.READ_WALL_CONNECTOR_VINS: wcv})
+     +    lim = C.RateLimit(50, 60)
+     +    assert byName["FleetAPI"].declarations() == {C.READ_LIST: D(C.CLOUD_FREE), C.READ_ONLINE: D(C.CLOUD_FREE), C.READ_CHARGE: D(C.FLEET_DATA), C.READ_LOCATION: D(C.FLEET_DATA),
+     +        C.SET_CHARGE_LIMIT: D(C.FLEET_COMMAND, lim), C.START_CHARGING: D(C.FLEET_COMMAND, lim), C.STOP_CHARGING: D(C.FLEET_COMMAND, lim), C.SET_AMPS: D(C.FLEET_COMMAND, lim),
+ 4:  9116d978 !  4:  c5ded235 Add the reconciler: charge-limit rules, adoption and one paid fallback
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Capability import (
+     +# The reader paces it: a connect edge, then one poll a minute
+     +WALL_CONNECTOR_VINS = Declaration(CLOUD_FREE)
+      
+    - 
+    - class OwnerAPIProvider(Provider):
+    + # The Tesla command each capability sends, for the read-only line
+    + TESLA_COMMAND = {
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Provider):
+              READ_ONLINE: Declaration(CLOUD_FREE),
+              READ_CHARGE: Declaration(FLEET_DATA),
+    @@ lib/TWCManager/VehicleCommandQueue.py
+     +# own run, key, isHigh, report and lost. Every entry such an instance
+     +# accepts is reported exactly once, through report or lost. Callbacks never
+     +# run under _cond.
+    - import collections
+    - import threading
+    - import time
+    + #
+    + # Legacy charge commands: one without a vin applies to every car, so it
+    + # replaces, and is replaced by, any pending charge command. A car gets at
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+              isHigh=None,
+              report=None,
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+                      # A dead or exited worker takes nothing; shutting down, only
+                      # a stop a worker can still run is taken
+                      losers.append((entry, "dropped"))
+    +@@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    +                 logger.debug("Not sending %r; a charge command went recently", entry)
+    +                 losers.append((entry, "dropped"))
+                      accepted = False
+     -            elif self.inline:
+     -                self._running, self._busy = entry, True
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+      
+          def remove(self, match) -> int:
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    -         # Legacy: until Task 13
+    -         return self.remove(lambda task: task["cmd"] == cmd and match(task))
+    +             and not (self._draining and self._is_high_priority(task))
+    +         )
+      
+     -    def pending(self) -> int:
+     -        with self._cond:
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+                      done = not self._high and not self._busy
+                  else:
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    -                 return None
+    -             table = self._high if self._high else self._low
+    -             _, (entry, callback) = table.popitem(last=False)
+    +             key, (entry, callback) = table.popitem(last=False)
+    +             if self._legacy and key[0] == "charge":
+    +                 self._lastChargeTime[key[1]] = time.monotonic()
+     -            self._running, self._busy = entry, True
+     +            self._busy = True
+                  if not self._high and not self._low:
+    @@ tests/unit/test_provider_tables.py: def test_expected_order_on_a_full_install(ke
+          assert byName["TeslaBLE"].declarations() == {c: D(C.LOCAL) for c in (C.READ_CHARGE, C.READ_LOCATION, C.READ_PLUG, C.READ_ONLINE, C.SET_CHARGE_LIMIT, C.START_CHARGING, C.STOP_CHARGING, C.SET_AMPS, C.WAKE)}
+     -    wcv = D(C.CLOUD_FREE, C.RateLimit(2, 60))
+     +    wcv = D(C.CLOUD_FREE)
+    -     assert byName["OwnerAPI"].declarations() == dict({c: D(C.CLOUD_FREE) for c in (C.READ_LIST, C.READ_ONLINE, C.READ_CHARGE, C.READ_LOCATION)}, **{C.READ_WALL_CONNECTOR_VINS: wcv})
+    +     assert byName["OwnerAPI"].declarations() == dict({c: D(C.CLOUD_FREE) for c in (C.READ_LIST, C.READ_ONLINE, C.READ_CHARGE, C.READ_LOCATION)}, **{c: D(C.OWNER_COMMAND) for c in C.COMMANDS}, **{C.READ_WALL_CONNECTOR_VINS: wcv})
+     -    lim = C.RateLimit(50, 60)
+          assert byName["FleetAPI"].declarations() == {C.READ_LIST: D(C.CLOUD_FREE), C.READ_ONLINE: D(C.CLOUD_FREE), C.READ_CHARGE: D(C.FLEET_DATA), C.READ_LOCATION: D(C.FLEET_DATA),
+     -        C.SET_CHARGE_LIMIT: D(C.FLEET_COMMAND, lim), C.START_CHARGING: D(C.FLEET_COMMAND, lim), C.STOP_CHARGING: D(C.FLEET_COMMAND, lim), C.SET_AMPS: D(C.FLEET_COMMAND, lim),
+ 5:  06563493 !  5:  e97154b8 Set charge limits through desired state and delete the legacy limit path
+    @@ lib/TWCManager/Vehicle/HomeAssistant.py: class HomeAssistant:
+              self, amps: float, vehicle: Optional[HaVehicle] = None, *args, **kwargs
+          ):
+     
+    + ## lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py ##
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: TESLA_COMMAND = {
+    + }
+    + 
+    + 
+    +-class OwnerAPIProvider(Provider):
+    ++class _TeslaAPIProvider(Provider):
+    ++    # One token slot of the TeslaAPI module. The command methods are shared:
+    ++    # TeslaAPI.command and wakeOutcome send through the slot that may
+    ++    # command the car (commandSlotFor), and ready() says which provider that
+    ++    # is, so each car's command goes out once
+    ++    local = False
+    ++    SUPPRESSED = CLOUD_SUPPRESSED
+    ++
+    ++    def __init__(self, carapi):
+    ++        self.carapi = carapi
+    ++        self.module = carapi
+    ++
+    ++    def ampsRange(self, vehicle) -> Optional[Tuple[float, float]]:
+    ++        if vehicle is None:
+    ++            return None
+    ++        return (1, vehicleMaxAmps(vehicle, self.carapi.master.config["config"]))
+    ++
+    ++    # Command methods: one request each (set_charging_amps below 5 A
+    ++    # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    ++    # the lane wakes first when the attempt says so.
+    ++
+    ++    # The clock passed to the wake hold; a test may replace it
+    ++    clock = time.time
+    ++
+    ++    def _car(self, vin: str):
+    ++        # The account's CarApiVehicle for vin, or None
+    ++        return self.carapi.getVehicleByVIN(vin) or None
+    ++
+    ++    def _command(self, vin: str, name: str, body: Optional[dict] = None) -> Outcome:
+    ++        car = self._car(vin)
+    ++        if car is None:
+    ++            return Outcome(UNSUPPORTED, "not listed")
+    ++        return self.carapi.command(car, name, body)
+    ++
+    ++    def setChargeLimit(self, vin: str, limit: int) -> Outcome:
+    ++        return self._command(vin, "set_charge_limit", {"percent": int(limit)})
+    ++
+    ++    def startCharging(self, vin: str) -> Outcome:
+    ++        outcome = self._command(vin, "charge_start")
+    ++        if outcome == Outcome(SATISFIED, "disconnected"):
+    ++            # Nothing to start: not a start
+    ++            return Outcome(UNSUPPORTED, "disconnected")
+    ++        return outcome
+    ++
+    ++    def stopCharging(self, vin: str) -> Outcome:
+    ++        return self._command(vin, "charge_stop")
+    ++
+    ++    def setAmps(self, vin: str, amps: int) -> Outcome:
+    ++        # Vehicle amps are never 0: 0 would stop the car charging
+    ++        body = {"charging_amps": max(1, int(amps))}
+    ++        outcome = self._command(vin, "set_charging_amps", body)
+    ++        if body["charging_amps"] < 5 and outcome.kind in SETTLED:
+    ++            # A rate below 5 A takes a second identical request (TeslaPy #42)
+    ++            time.sleep(5)
+    ++            outcome = self._command(vin, "set_charging_amps", body)
+    ++        return outcome
+    ++
+    ++    def wake(self, vin: str) -> Outcome:
+    ++        car = self._car(vin)
+    ++        if car is None:
+    ++            return Outcome(UNSUPPORTED, "not listed")
+    ++        return self.carapi.wakeOutcome(car, now=self.clock())
+    ++
+    ++
+    ++class OwnerAPIProvider(_TeslaAPIProvider):
+    +     # Commands only a car Tesla lists with command_signing "off": free, but
+    +     # paced as Fleet (OWNER_COMMAND). The inherited command methods answer
+    +     # UNSUPPORTED; the legacy module sends through commandSlotFor
+    +     name = "OwnerAPI"
+    +     rank = 4
+    +-    local = False
+    +     DECLARATIONS = {
+    +         READ_LIST: Declaration(CLOUD_FREE),
+    +         READ_ONLINE: Declaration(CLOUD_FREE),
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Provider):
+    +         WAKE: Declaration(OWNER_COMMAND),
+    +         READ_WALL_CONNECTOR_VINS: WALL_CONNECTOR_VINS,
+    +     }
+    +-    SUPPRESSED = CLOUD_SUPPRESSED
+    +-
+    +-    def __init__(self, carapi):
+    +-        self.carapi = carapi
+    +-        self.module = carapi
+    + 
+    +     def ready(self, vehicle, capability) -> bool:
+    +         if capability == READ_WALL_CONNECTOR_VINS:
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Provider):
+    +         return self.carapi.wallConnectorVins(self.carapi.ownerSlot)
+    + 
+    + 
+    +-class FleetAPIProvider(Provider):
+    ++class FleetAPIProvider(_TeslaAPIProvider):
+    +     name = "FleetAPI"
+    +     rank = 5
+    +-    local = False
+    +     DECLARATIONS = {
+    +         READ_LIST: Declaration(CLOUD_FREE),
+    +         READ_ONLINE: Declaration(CLOUD_FREE),
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Provider):
+    +         WAKE: Declaration(FLEET_WAKE),
+    +         READ_WALL_CONNECTOR_VINS: WALL_CONNECTOR_VINS,
+    +     }
+    +-    SUPPRESSED = CLOUD_SUPPRESSED
+    +-
+    +-    def __init__(self, carapi):
+    +-        self.carapi = carapi
+    +-        self.module = carapi
+    + 
+    +     def ready(self, vehicle, capability) -> bool:
+    +         if capability == READ_WALL_CONNECTOR_VINS:
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Provider):
+    +             return self.carapi.wallConnectorVinsReady(self.carapi.fleetSlot)
+    +         return self.carapi.fleetSlot.usable("read")
+    + 
+    +-    def ampsRange(self, vehicle) -> Optional[Tuple[float, float]]:
+    +-        if vehicle is None:
+    +-            return None
+    +-        return (1, vehicleMaxAmps(vehicle, self.carapi.master.config["config"]))
+    +-
+    +-    # Command methods: one billed request each (set_charging_amps below 5 A
+    +-    # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    +-    # the lane wakes first when the attempt says so.
+    +-
+    +-    # The clock passed to the wake hold; a test may replace it
+    +-    clock = time.time
+    +-
+    +-    def _car(self, vin: str):
+    +-        # The account's CarApiVehicle for vin, or None
+    +-        return self.carapi.getVehicleByVIN(vin) or None
+    +-
+    +-    def _command(self, vin: str, name: str, body: Optional[dict] = None) -> Outcome:
+    +-        car = self._car(vin)
+    +-        if car is None:
+    +-            return Outcome(UNSUPPORTED, "not listed")
+    +-        return self.carapi.command(car, name, body)
+    +-
+    +-    def setChargeLimit(self, vin: str, limit: int) -> Outcome:
+    +-        return self._command(vin, "set_charge_limit", {"percent": int(limit)})
+    +-
+    +-    def startCharging(self, vin: str) -> Outcome:
+    +-        outcome = self._command(vin, "charge_start")
+    +-        if outcome == Outcome(SATISFIED, "disconnected"):
+    +-            # Nothing to start: not a start
+    +-            return Outcome(UNSUPPORTED, "disconnected")
+    +-        return outcome
+    +-
+    +-    def stopCharging(self, vin: str) -> Outcome:
+    +-        return self._command(vin, "charge_stop")
+    +-
+    +-    def setAmps(self, vin: str, amps: int) -> Outcome:
+    +-        # Vehicle amps are never 0: 0 would stop the car charging
+    +-        body = {"charging_amps": max(1, int(amps))}
+    +-        outcome = self._command(vin, "set_charging_amps", body)
+    +-        if body["charging_amps"] < 5 and outcome.kind in SETTLED:
+    +-            # A rate below 5 A takes a second identical request (TeslaPy #42)
+    +-            time.sleep(5)
+    +-            outcome = self._command(vin, "set_charging_amps", body)
+    +-        return outcome
+    +-
+    +-    def wake(self, vin: str) -> Outcome:
+    +-        car = self._car(vin)
+    +-        if car is None:
+    +-            return Outcome(UNSUPPORTED, "not listed")
+    +-        return self.carapi.wakeOutcome(car, now=self.clock())
+    +-
+    +     def wallConnectorVins(self) -> Optional[Dict[str, str]]:
+    +         return self.carapi.wallConnectorVins(self.carapi.fleetSlot)
+    +
+      ## lib/TWCManager/Vehicle/Reconcile/HeldLimits.py ##
+     @@
+      # none). Persisted in settings["heldLimits"] as
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -            if charge:
+     -                self.applyChargeLimit(self.lastChargeLimitApplied, checkArrival=True)
+     -
+    -             slot = self.slotFor("command")
+    +             slot = self.commandSlotFor(vehicle)
+                  if slot is None:
+    -                 result = "error"
+    +                 # Read-only since the check above: Tesla refused the
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                  return apiResponseDict["response"]["string"].split(": ")[-1]
+              return ""
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -
+     -        needToWake = False
+     -        for vehicle in vehicles:
+    +-            if self.refuseCommandFor(vehicle, "set_charge_limit"):
+    +-                continue
+     -            wasAtHome, outside, lastApplied = self.master.getNormalChargeLimit(
+     -                vehicle.ID
+     -            )
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -            self.carApiLastChargeLimitApplyTime = now
+     -
+     -        needSleep = False
+    +-        refused = False
+     -        for vehicle in vehicles:
+    +-            if self.refuseCommandFor(vehicle, "set_charge_limit"):
+    +-                refused = True
+    +-                continue
+     -            if vehicle.stopTryingToApplyLimit or not vehicle.ready():
+     -                continue
+     -
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -
+     -            if vehicle.atHome and vehicle.stopTryingToApplyLimit:
+     -                needSleep = True
+    +-            if self.readOnlyFor(vehicle):
+    +-                # Tesla refused the Owner API limit sent just now
+    +-                refused = True
+     -
+     -        if needSleep:
+     -            # If you start charging too quickly after setting the charge limit,
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -            self.updateChargeAtHome()
+     -
+     -        # VehiclePriority reads None as failure and would try the next
+    --        # provider (Home Assistant: a second, billed command)
+    --        return "success"
+    +-        # provider (Home Assistant: a second, billed command). A car this
+    +-        # module may not command is a failure, so the next provider gets it.
+    +-        return "error" if refused else "success"
+     -
+          def _unavailableResult(self):
+              # car_api_available() is False on a failure (no usable token, no
+              # vehicle list, the error backoff) and also while it holds off waking
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +     # in between). Nothing here retries a billed request.
+    + 
+    +     def command(self, vehicle, name: str, body: Optional[dict] = None) -> Outcome:
+    +-        # One Fleet API command (name, e.g. "set_charge_limit") to vehicle
+    +-        slot = self.slotFor("command")
+    ++        # One Tesla API command (name, e.g. "set_charge_limit") to vehicle,
+    ++        # through the slot that may command this car (commandSlotFor)
+    ++        slot = self.commandSlotFor(vehicle)
+    +         if slot is None:
+    ++            # Says once why this car is read-only
+    ++            self.refuseCommandFor(vehicle, name)
+    +             return Outcome(REFUSED, "no command token")
+    +         if self.getCarApiRetryRemaining(vehicle, now=self.now()):
+    +             return Outcome(UNREACHABLE, "backoff")
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +             except requests.exceptions.RequestException as e:
+    +                 return Outcome(ERROR, type(e).__name__), None
+    +             code = req.status_code
+    ++            if slot is self.ownerSlot and self.noteOwnerCommandRefused(vehicle, req):
+    ++                # Tesla refused the Owner API for this car (logged, latched):
+    ++                # no error backoff, so the next provider sends at once
+    ++                return Outcome(REFUSED, "owner refused"), None
+    +             if code == 401:
+    +                 if (
+    +                     not refreshed
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         # online check (vehicles/{vin}, cached 120 s) says it is not online
+    +         # and wakeDue allows it. One wake_up at most.
+    +         now = self.now() if now is None else now
+    +-        slot = self.slotFor("command")
+    ++        slot = self.commandSlotFor(vehicle)
+    +         if slot is None:
+    ++            self.refuseCommandFor(vehicle, "wake_up")
+    +             return Outcome(REFUSED, "no command token")
+    +         if self.getCarApiRetryRemaining(vehicle, now=now):
+    +             # Told to back off: not even the free check
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         if not vehicle.lastVehicleAwakeKnown:
+    +             # No free answer (no read token, an error): never wake blind
+    +             return Outcome(UNREACHABLE, "online check failed")
+    +-        if not slot.usable("wake"):
+    ++        if slot is self.fleetSlot and not slot.usable("wake"):
+    +             # Tesla refused a wake with this token (403): no wake_up until
+    +             # the token changes. Checked after the free online check, so an
+    +-            # online car still gets its command
+    ++            # online car still gets its command. An Owner refusal is noted
+    ++            # per car instead
+    +             return Outcome(UNREACHABLE, "wake refused")
+    +         if vehicle.firstChargeNeededTime == 0:
+    +             vehicle.firstChargeNeededTime = now
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          def updateChargeAtHome(self):
+              # True when this module holds cars to refresh, so VehiclePriority's
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+          stopAskingToStartCharging = False
+     -    stopTryingToApplyLimit = False
+          statusDeferral = 0
+    -     # update_charge reuses a charge reading up to this old (seconds).
+    -     READ_MAX_AGE = 300
+    +     # command_signing from Tesla's vehicle list: Owner API commands go only
+    +     # to cars where it is "off". ownerCommandsRefused is set when Tesla
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+                      "FleetAPI", lambda: carapi.fleetSlot.usable("command"), "listed"
+                  )
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+                  self.lastCurrentChangeTime = time.time()
+     -
+     -    def apply_charge_limit(self, limit):
+    --        if self.carapi.refuseCommandIfReadOnly("set_charge_limit"):
+    +-        if self.carapi.refuseCommandFor(self, "set_charge_limit"):
+     -            return False
+     -
+     -        if self.stopTryingToApplyLimit:
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+     -
+     -        self.lastLimitAttemptTime = now
+     -
+    --        slot = self.carapi.slotFor("command")
+    --        if slot is None:
+    --            return False
+    +-        slot = self.carapi.commandSlotFor(self)
+     -        url = slot.baseURL + "/"
+     -        url = url + str(self.VIN) + "/command/set_charge_limit"
+     -
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+     -        body = {"percent": limit}
+     -
+     -        for _ in range(0, 3):
+    +-            req = None
+     -            try:
+     -                req = requests.post(
+     -                    url, headers=headers, json=body, verify=slot.verifyCert
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+     -            except json.decoder.JSONDecodeError:
+     -                pass
+     -
+    +-            if slot is self.carapi.ownerSlot and self.carapi.noteOwnerCommandRefused(
+    +-                self, req
+    +-            ):
+    +-                return False
+    +-
+     -            result = False
+     -            reason = ""
+     -            try:
+    @@ tests/unit/test_teslaapi_charge_vin.py: def api(monkeypatch, requests_mock):
+              "POST",
+              re.compile(r".*/command/charge_(start|stop)"),
+     
+    + ## tests/unit/test_teslaapi_providers.py ##
+    +@@ tests/unit/test_teslaapi_providers.py: def test_fleet_commands_resolve_the_car_by_vin():
+    +     api.wakeOutcome.assert_called_once_with(car, now=1000.0)
+    +     assert fleet.setAmps("5YJ3E1EA1KF000009", 10) == O.Outcome(O.UNSUPPORTED, "not listed")
+    +     assert fleet.wake("5YJ3E1EA1KF000009") == O.Outcome(O.UNSUPPORTED, "not listed")
+    +-    assert owner.setAmps(VIN, 10).kind == O.UNSUPPORTED    # Owner declares no commands
+    ++    assert owner.setAmps(VIN, 10) == O.Outcome(O.DONE)    # the Owner provider shares the command path
+    + 
+    + 
+    + def test_read_source_passes_its_slot_to_the_car():
+    +
+      ## tests/unit/test_teslaapi_readonly_gate.py ##
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestTeslaAPIRefusesCommands:
+              assert any_http.call_count == 0
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestTeslaAPIRefusesCommands:
+              assert no_error_recorded(owner_api)
+      
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePrioritySkipsReadOnly:
+    +         assert priority.setChargeRate(10) is True
+              assert api.setChargeRate.called
+      
+    -     @pytest.mark.parametrize(
+    +-    @pytest.mark.parametrize(
+     -        "method", ["car_api_charge", "applyChargeLimit", "wakeVehicle"]
+    -+        "method", ["car_api_charge", "wakeVehicle"]
+    -     )
+    +-    )
+    ++    @pytest.mark.parametrize("method", ["car_api_charge", "wakeVehicle"])
+          def test_every_command_method_skips(self, method, no_threads):
+              priority, master, ble, api = self.make(api_read_only=True)
+    +         setattr(ble, method, Mock(return_value=False))
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: COMMANDS = {
+    +         "/command/set_charging_amps",
+    +         lambda api, vehicle: api.setChargeRate(10, vehicle),
+    +     ),
+    +-    "apply_charge_limit": (
+    ++    "set_charge_limit": (
+    +         "/command/set_charge_limit",
+    +-        lambda api, vehicle: vehicle.apply_charge_limit(80),
+    +-    ),
+    +-    "applyChargeLimit": (
+    +-        "/command/set_charge_limit",
+    +-        lambda api, vehicle: api.applyChargeLimit(80),
+    ++        lambda api, vehicle: owner_provider(api).setChargeLimit(vehicle.VIN, 80),
+    +     ),
+    +     "charge_start": (
+    +         "/command/charge_start",
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: COMMANDS = {
+    + }
+    + 
+    + 
+    ++def owner_provider(api):
+    ++    """The OwnerAPI provider: charge limits go through the reconciler's
+    ++    provider command methods, which send through commandSlotFor."""
+    ++    return api.providers()[0]
+    ++
+    ++
+    ++class Refusal:
+    ++    """Matches an Outcome whose kind is one of the given kinds."""
+    ++
+    ++    def __init__(self, *kinds):
+    ++        self.kinds = kinds
+    ++
+    ++    def __eq__(self, other):
+    ++        return getattr(other, "kind", None) in self.kinds
+    ++
+    ++
+    ++REFUSED_OUTCOME = Refusal("refused")
+    ++
+    + # What each command path returns when Tesla refuses it (and latches the
+    +-# car), then when it is refused locally afterwards. applyChargeLimit returns
+    +-# None after any send it makes; once every car is read-only it refuses at the
+    +-# top with "error". VehiclePriority treats all of these as failure.
+    ++# car), then when it is refused locally afterwards. VehiclePriority and the
+    ++# reconciler treat all of these as failure.
+    + REFUSED_RETURNS = {
+    +     "set_charging_amps": (False, False),
+    +-    "apply_charge_limit": (False, False),
+    +-    "applyChargeLimit": ("error", "error"),
+    ++    "set_charge_limit": (REFUSED_OUTCOME, REFUSED_OUTCOME),
+    +     "charge_start": ("error", "error"),
+    +     "charge_stop": ("error", "error"),
+    +     "wake_up": (False, False),
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestRefusedVehicles:
+    + 
+    +         assert api.readOnly is True
+    +         assert api.readOnlyFor(vehicle) is True
+    +-        assert send(api, vehicle) in (False, "error")
+    ++        assert send(api, vehicle) in (False, "error", REFUSED_OUTCOME)
+    + 
+    +         assert any_http.call_count == 0
+    +         assert no_error_recorded(api)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: PRIORITY_CALLS = {
+    +         "/command/set_charging_amps",
+    +         lambda priority, vehicle: priority.setChargeRate(10, vehicle),
+    +     ),
+    +-    "applyChargeLimit": (
+    +-        "/command/set_charge_limit",
+    +-        lambda priority, vehicle: priority.applyChargeLimit(80),
+    +-    ),
+    +     "car_api_charge": (
+    +         "/command/charge_stop",
+    +         lambda priority, vehicle: priority.car_api_charge({"charge": False}),
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +     # What each path returns for those answers, as before the latch.
+    +     FLEET_RETURNS = {
+    +         "set_charging_amps": lambda body: body,
+    +-        "apply_charge_limit": lambda body: False,
+    +-        "applyChargeLimit": lambda body: "success",
+    ++        # A Fleet refusal is REFUSED (403, 412) or ERROR (410)
+    ++        "set_charge_limit": lambda body: Refusal("refused", "error"),
+    +         "charge_start": lambda body: "error",
+    +         "charge_stop": lambda body: "error",
+    +         "wake_up": lambda body: False,
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    + 
+    +         assert cmd.call_count >= 1
+    +         assert vehicle.ownerCommandsRefused is False
+    +-        assert api.commandSlotFor(vehicle) is api.fleetSlot
+    ++        # The reconciler path retires a Fleet token Tesla refused (403, 412);
+    ++        # the Owner token then carries this car's commands
+    ++        if api.fleetSlot.usable("command"):
+    ++            assert api.commandSlotFor(vehicle) is api.fleetSlot
+    ++        else:
+    ++            assert api.commandSlotFor(vehicle) is api.ownerSlot
+    +         assert api.readOnlyFor(vehicle) is False
+    + 
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePriorityLogsWhy:
+    +     """When every listed car is read-only, VehiclePriority skips TeslaAPI
+    +     without calling it; the skip still logs the per-car reason once."""
+    + 
+    +-    @pytest.mark.parametrize(
+    +-        "method", ["setChargeRate", "car_api_charge", "applyChargeLimit"]
+    +-    )
+    ++    @pytest.mark.parametrize("method", ["setChargeRate", "car_api_charge"])
+    +     def test_one_line_naming_the_car(self, owner_car, any_http, caplog, method):
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car("required")
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePriorityLogsWhy:
+    +             "car_api_charge": lambda priority: priority.car_api_charge(
+    +                 {"charge": True}
+    +             ),
+    +-            "applyChargeLimit": lambda priority: priority.applyChargeLimit(80),
+    +         }
+    + 
+    +         for _ in range(5):
+     
+      ## tests/unit/test_teslaapi_token_slots.py ##
+     @@ tests/unit/test_teslaapi_token_slots.py: def test_command_refused_without_usable_fleet(no_threads, requests_mock, fleet):
+    @@ tests/unit/test_vehicle_command_queue.py: class TestCallbacksAndErrors:
+              wait_idle(q)
+              q.put({"cmd": "setChargeRate", "amps": 16, "vehicle": None})
+              wait_idle(q)
+    --        assert module.calls == [("applyChargeLimit", 80, None, False), ("setChargeRate", 16, None)]
+    -+        assert module.calls == [("setAmps", 80, None), ("setChargeRate", 16, None)]
+    +         assert module.calls == [
+    +-            ("applyChargeLimit", 80, None, False),
+    ++            ("setAmps", 80, None),
+    +             ("setChargeRate", 16, None),
+    +         ]
+      
+    -     def test_no_module_gives_false_and_worker_survives(self, module):
+    -         available = []
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestCallbacksAndErrors:
+              q = VehicleCommandQueue(lambda: available[0] if available else None)
+              q.start()
+              results = []
+    @@ tests/unit/test_vehicle_command_queue.py: class TestCallbacksAndErrors:
+              q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+      
+              outcome = []
+    -@@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+    +@@ tests/unit/test_vehicle_command_queue.py: def stop_for(vin=None):
+      
+      class TestKeying:
+          def test_charge_keyed_per_vin(self, q, module):
+    @@ tests/unit/test_vehicle_command_queue.py: class TestKeying:
+                  ("charge", True, "V2"),
+              ]
+      
+    -     def test_none_vin_is_distinct_from_named_vin(self, q, module):
+    +     def test_charge_commands_for_different_cars_both_run(self, unlimited, module):
+    +         q = unlimited
+    +-        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    ++        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +         q.put({"cmd": "charge", "charge": True, "vin": "V3"})
+    +         module.gate.set()
+    +         wait_idle(q)
+    +         assert module.calls == [
+    +-            ("applyChargeLimit", 80, None, False),
+    ++            ("setAmps", 80, None),
+    +             ("charge", False, "V1"),
+    +             ("charge", False, "V2"),
+    +             ("charge", True, "V3"),
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestKeying:
+    + 
+    +     def test_vehicleless_start_replaces_every_pending_stop(self, unlimited, module):
+    +         q = unlimited
+     -        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+     +        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+              q.put({"cmd": "charge", "charge": True})
+    -         q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+              module.gate.set()
+              wait_idle(q)
+              assert module.calls == [
+     -            ("applyChargeLimit", 80, None, False),
+     +            ("setAmps", 80, None),
+                  ("charge", True, None),
+    -             ("charge", True, "V1"),
+    +         ]
+    + 
+    +     def test_stop_for_one_car_replaces_a_vehicleless_start(self, unlimited, module):
+    +         q = unlimited
+    +-        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    ++        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +         q.put({"cmd": "charge", "charge": True})
+    +         q.put({"cmd": "charge", "charge": True, "vin": "V2"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestKeying:
+    +         wait_idle(q)
+    +         # The start for every car overlapped V1's stop; V2's own start did not.
+    +         assert module.calls == [
+    +-            ("applyChargeLimit", 80, None, False),
+    ++            ("setAmps", 80, None),
+    +             ("charge", False, "V1"),
+    +             ("charge", True, "V2"),
+    +         ]
+    + 
+    +     def test_empty_vin_means_every_car(self, unlimited, module):
+    +         q = unlimited
+    +-        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    ++        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +         q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": ""})
+    +         module.gate.set()
+    +         wait_idle(q)
+    +         assert module.calls == [
+    +-            ("applyChargeLimit", 80, None, False),
+    ++            ("setAmps", 80, None),
+    +             ("charge", False, ""),
+              ]
+      
+     -    def test_apply_charge_limit_per_vin_does_not_merge_with_policy_wide(
+    @@ tests/unit/test_vehicle_command_queue.py: class TestKeying:
+     -        wait_idle(q)
+     -        assert calls == [80]
+     -
+    --
+    + 
+      class TestCancel:
+          def test_cancel_removes_matching_pending_entries(self, q, module):
+    -         block_worker(q, module, {"cmd": "setChargeRate", "amps": 6, "vehicle": None})
+     @@ tests/unit/test_vehicle_command_queue.py: class TestCancel:
+              assert module.calls == [("charge", False, "V1")]
+      
+    @@ tests/unit/test_vehicle_command_queue.py: class TestCancel:
+     +            ("setAmps", 80, None),
+                  ("setChargeRate", 10, None),
+              ]
+    + 
+    +     def test_cancels_pending_stop_for_the_car(self, unlimited, module):
+    +         q = unlimited
+    +-        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    ++        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +         assert q.cancel("charge", stop_for("V1")) == 1
+    +         module.gate.set()
+    +         wait_idle(q)
+    +         assert module.calls == [
+    +-            ("applyChargeLimit", 80, None, False),
+    ++            ("setAmps", 80, None),
+    +             ("charge", False, "V2"),
+    +         ]
+    + 
+    +     def test_cancels_a_stop_for_every_car(self, unlimited, module):
+    +         q = unlimited
+    +-        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    ++        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": None})
+    +         assert q.cancel("charge", stop_for("V1")) == 1
+    +         module.gate.set()
+    +         wait_idle(q)
+    +-        assert module.calls == [("applyChargeLimit", 80, None, False)]
+    ++        assert module.calls == [("setAmps", 80, None)]
+    + 
+    +     @pytest.mark.parametrize("vin", [None, ""])
+    +     def test_without_vin_cancels_every_stop(self, unlimited, module, vin):
+    +         q = unlimited
+    +-        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    ++        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +         assert q.cancel("charge", stop_for(vin)) == 2
+    +         module.gate.set()
+    +         wait_idle(q)
+    +-        assert module.calls == [("applyChargeLimit", 80, None, False)]
+    ++        assert module.calls == [("setAmps", 80, None)]
+    + 
+    +     def test_leaves_starts_and_other_commands(self, unlimited, module):
+    +         q = unlimited
+    +         block_worker(q, module, {"cmd": "setChargeRate", "amps": 6, "vehicle": None})
+    +         q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    +-        q.put({"cmd": "applyChargeLimit", "limit": 80})
+    ++        q.put({"cmd": "setAmps", "vin": None, "amps": 80})
+    +         assert q.cancel("charge", stop_for("V1")) == 0
+    +         module.gate.set()
+    +         wait_idle(q)
+    +         assert module.calls == [
+    +             ("setChargeRate", 6, None),
+    +             ("charge", True, "V1"),
+    +-            ("applyChargeLimit", 80, None, False),
+    ++            ("setAmps", 80, None),
+    +         ]
+    + 
+    +     def test_stops_are_not_cancelled_during_shutdown(self, unlimited, module):
+     
+      ## tests/unit/test_vehicle_priority.py ##
+     @@ tests/unit/test_vehicle_priority.py: def test_ble_only_skips_cloud_commands_but_not_reads():
+ 6:  5ed7f9bc !  6:  a6389ecd Start and stop charging as desired state and delete the legacy path
+    @@ lib/TWCManager/TWCMaster.py: class TWCMaster:
+     -        vin = vin or None
+     -        stopMode = int(self.settings.get("chargeStopMode", 1))
+     -        if stopMode == 1:
+    --            # A pending start for this car (or for every car) is now moot.
+    --            self.vehicleCommandQueue.cancel(
+    --                "charge",
+    --                lambda task: bool(task.get("charge"))
+    --                and (vin is None or task.get("vin") in (vin, None)),
+    --            )
+     -            self.queue_background_task({"cmd": "charge", "charge": False, "vin": vin})
+     +        # The opposite of startCarsCharging. chargeStopMode picks how: 1 the
+     +        # car (BLE, the Tesla API), 2 refusing to answer the slaves, 3 the
+    @@ lib/TWCManager/TWCSlave.py: class TWCSlave:
+                              + str(self.reportedAmpsActual)
+                              + " < 4"
+                          )
+    --                    self.master.cancelStopCarsCharging()
+    +-                    self.master.cancelStopCarsCharging(self.currentVIN)
+     +                    self.master.cancelStopCarsCharging(key)
+                      else:
+     -                    # Car is trying to charge, so stop it via car API.
+    @@ lib/TWCManager/TWCSlave.py: class TWCSlave:
+              desiredAmpsOffered = self.set_last_amps_offered(desiredAmpsOffered)
+      
+     -        if desiredAmpsOffered > 0:
+    --            self.master.cancelStopCarsCharging()
+    +-            self.master.cancelStopCarsCharging(self.currentVIN)
+     +        key = self.vehicleKey
+     +        if key is not None and desiredAmpsOffered > 0:
+     +            self.master.cancelStopCarsCharging(key)
+    @@ lib/TWCManager/Vehicle/Providers/Suppressions.py: class Suppressions:
+              return frozenset(conditions)
+     
+      ## lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py ##
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Provider):
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+              return outcome
+      
+          def stopCharging(self, vin: str) -> Outcome:
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -                    # Targeted command: leave other cars asleep.
+     -                    continue
+     -
+    +-                if self.readOnlyFor(vehicle):
+    +-                    # No token can command this car; don't wake it. The
+    +-                    # command itself logs the refusal.
+    +-                    continue
+    +-
+     -                if charge is True and vehicle.stopAskingToStartCharging:
+     -                    # Vehicle is in a state (complete or charging) already
+     -                    # which doesn't make sense for us to keep requesting it
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -
+     -                # Car is still not awake.  Send a wake command.
+     -                apiResponseDict = self.wakeVehicle(vehicle)
+    +-                if apiResponseDict is False and self.readOnlyFor(vehicle):
+    +-                    # Tesla refused the Owner API wake_up for this car
+    +-                    # (logged); not an API error, which would back off reads.
+    +-                    continue
+     -
+     -                state = "error"
+     -                logger.debug("Car API wake car response" + str(apiResponseDict))
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -            if vin and vehicle.VIN != vin:
+     -                continue
+     -
+    +-            if self.refuseCommandFor(vehicle, "charge_" + startOrStop):
+    +-                # Failure, so VehiclePriority tries the next module.
+    +-                result = "error"
+    +-                continue
+    +-
+     -            if charge and vehicle.stopAskingToStartCharging:
+     -                logger.log(
+     -                    logging.INFO8,
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -            # wait 5 seconds in case of hardware differences between cars.
+     -            time.sleep(5)
+     -
+    --            slot = self.slotFor("command")
+    +-            slot = self.commandSlotFor(vehicle)
+     -            if slot is None:
+    +-                # Read-only since the check above: Tesla refused the
+    +-                # Owner API charge limit sent just now.
+     -                result = "error"
+     -                continue
+     -            url = slot.baseURL + "/"
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -
+     -            # Retry up to 3 times on certain errors.
+     -            for _ in range(0, 3):
+    +-                req = None
+     -                try:
+     -                    req = requests.post(url, headers=headers, verify=slot.verifyCert)
+     -                    logger.log(
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -                except json.decoder.JSONDecodeError:
+     -                    pass
+     -
+    +-                if slot is self.ownerSlot and self.noteOwnerCommandRefused(
+    +-                    vehicle, req
+    +-                ):
+    +-                    result = "error"
+    +-                    break
+    +-
+     -                try:
+     -                    logger.log(
+     -                        logging.INFO4,
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+          lastChargeNeededTime = 0
+     -    stopAskingToStartCharging = False
+          statusDeferral = 0
+    -     # update_charge reuses a charge reading up to this old (seconds).
+    -     READ_MAX_AGE = 300
+    +     # command_signing from Tesla's vehicle list: Owner API commands go only
+    +     # to cars where it is "off". ownerCommandsRefused is set when Tesla
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+              obs = vehicle.latest("state") if vehicle is not None else None
+              return obs.at if obs is not None else 0
+    @@ lib/TWCManager/Vehicle/VehiclePriority.py: class VehiclePriority:
+      
+     -    @staticmethod
+     -    def _listUnloaded(provider) -> bool:
+    --        # FleetAPI is ready only for a car on TeslaAPI's vehicle list, but
+    --        # only TeslaAPI's own command methods load that list. Until it is
+    --        # loaded, a targeted command keeps Fleet (ordered() has already
+    --        # checked it can command), and TeslaAPI loads the list and finds the
+    --        # car itself, as before the provider order.
+    --        if provider.name != "FleetAPI":
+    +-        # TeslaAPI's providers are ready only for a car on its vehicle list,
+    +-        # but only TeslaAPI's own command methods load that list. Until it
+    +-        # is loaded, a targeted command keeps them (ordered() has already
+    +-        # checked the slot can command), and TeslaAPI loads the list and
+    +-        # finds the car itself, as before the provider order.
+    +-        if provider.name not in ("OwnerAPI", "FleetAPI"):
+     -            return False
+     -        try:
+     -            return provider.module.getVehicleCount() == 0
+    @@ lib/TWCManager/Vehicle/VehiclePriority.py: class VehiclePriority:
+              try:
+     
+      ## lib/TWCManager/VehicleCommandQueue.py ##
+    -@@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    +@@
+    + # own run, key, isHigh, report and lost. Every entry such an instance
+    + # accepts is reported exactly once, through report or lost. Callbacks never
+    + # run under _cond.
+    +-#
+    +-# Legacy charge commands: one without a vin applies to every car, so it
+    +-# replaces, and is replaced by, any pending charge command. A car gets at
+    +-# most one charge start/stop attempt per CHARGE_COMMAND_INTERVAL. Callers
+    +-# re-request every loop while they want a change, so a refused command isn't
+    +-# retried back to back.
+    + import collections
+    + import threading
+    + import time
+    +@@ lib/TWCManager/VehicleCommandQueue.py: def _setAmps(module, task):
+    + 
+    + class VehicleCommandQueue:
+          MAX_PENDING = 64
+    +-    CHARGE_COMMAND_INTERVAL = 60
+      
+          _DISPATCH = {
+     -        "charge": lambda module, task: module.car_api_charge(task),
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+              self._lost = lost
+              self._cond = threading.Condition()
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    +         # The worker thread is between start() and its exit
+    +         self._live = False
+    +         self._overflowWarned = False
+    +-        # Legacy: per-VIN (None: every car) time of the last charge attempt
+    +-        self._lastChargeTime = {}
+    + 
+    +     @staticmethod
+    +     def _key(task):
+    +@@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    +         if cmd == "setChargeRate":
+    +             vehicle = task.get("vehicle")
+    +             return (cmd, getattr(vehicle, "VIN", vehicle))
+    +-        if cmd == "charge":
+    +-            # TWCSlave passes "" when it hasn't read the car's VIN
+    +-            return (cmd, task.get("vin") or None)
+              # None is a distinct target meaning "every vehicle".
+              return (cmd, task.get("vin"))
+      
+    +-    @staticmethod
+    +-    def _replaces(key, other):
+    +-        # A legacy charge command for every car (vin None) and one for a
+    +-        # single car overlap, so the newer one replaces the older.
+    +-        if key[0] != "charge" or other[0] != "charge":
+    +-            return key == other
+    +-        return key[1] is None or other[1] is None or key[1] == other[1]
+    +-
+    +-    def _chargeHeld(self, key):
+    +-        # Legacy: True while this charge command's car (or any car, for a
+    +-        # vehicle-less command) had a charge attempt within the interval
+    +-        since = time.monotonic() - max(
+    +-            (
+    +-                t
+    +-                for k, t in self._lastChargeTime.items()
+    +-                if self._replaces(key, ("charge", k))
+    +-            ),
+    +-            default=float("-inf"),
+    +-        )
+    +-        return since < self.CHARGE_COMMAND_INTERVAL
+    +-
+     -    @staticmethod
+     -    def _is_high_priority(task):
+     -        return task["cmd"] == "charge" and "charge" in task and not task["charge"]
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+          def start(self):
+              with self._cond:
+                  if self._thread is not None or self._draining:
+    +@@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    +                 # a stop a worker can still run is taken
+    +                 losers.append((entry, "dropped"))
+    +                 accepted = False
+    +-            elif (
+    +-                self._legacy
+    +-                and key[0] == "charge"
+    +-                and not self._draining
+    +-                and self._chargeHeld(key)
+    +-            ):
+    +-                logger.debug("Not sending %r; a charge command went recently", entry)
+    +-                losers.append((entry, "dropped"))
+    +-                accepted = False
+    +             else:
+    +                 table, other = (
+    +                     (self._high, self._low) if high else (self._low, self._high)
+    +                 )
+    +-                replaces = self._replaces if self._legacy else (lambda a, b: a == b)
+    +                 for t in (other, table):
+    +-                    for k in [k for k in t if replaces(key, k)]:
+    +-                        losers.append((t[k][0], "replaced"))
+    +-                        if t is other or k != key:
+    +-                            del t[k]
+    ++                    if key in t:
+    ++                        losers.append((t[key][0], "replaced"))
+    ++                        if t is other:
+    ++                            del t[key]
+    +                 if (
+    +                     key not in table
+    +                     and len(self._high) + len(self._low) >= self.MAX_PENDING
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+              self._lose(losers)
+              return len(losers)
+      
+     -    def cancel(self, cmd, match):
+    --        # Legacy: until Task 13
+    --        return self.remove(lambda task: task["cmd"] == cmd and match(task))
+    +-        # Legacy: until Task 13. Stops are kept during shutdown, which must
+    +-        # send them.
+    +-        return self.remove(
+    +-            lambda task: task["cmd"] == cmd
+    +-            and match(task)
+    +-            and not (self._draining and self._is_high_priority(task))
+    +-        )
+     -
+          # --- shutdown ---
+      
+          def close(self) -> None:
+    +@@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+    +                 self._cond.notify_all()
+    +                 return None
+    +             table = self._high if self._high else self._low
+    +-            key, (entry, callback) = table.popitem(last=False)
+    +-            if self._legacy and key[0] == "charge":
+    +-                self._lastChargeTime[key[1]] = time.monotonic()
+    ++            _, (entry, callback) = table.popitem(last=False)
+    +             self._busy = True
+    +             if not self._high and not self._low:
+    +                 # The backlog has cleared: the next overflow warns again
+     
+      ## tests/unit/test_charging_reconciler.py (new) ##
+     @@
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestRefusalLogging:
+      
+              # Fleet token: commands allowed. Fleet slot cleared: logs again, once.
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+    -                 "response": [{"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"}],
+    +                 ],
+                  },
+              )
+     -        assert api.car_api_available() is True
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+              assert api.getVehicleCount() == 1
+      
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePrioritySkipsReadOnly:
+    +         assert priority.setChargeRate(10) is True
+              assert api.setChargeRate.called
+      
+    -     @pytest.mark.parametrize(
+    --        "method", ["car_api_charge", "wakeVehicle"]
+    -+        "method", ["setChargeRate", "wakeVehicle"]
+    -     )
+    +-    @pytest.mark.parametrize("method", ["car_api_charge", "wakeVehicle"])
+    ++    @pytest.mark.parametrize("method", ["setChargeRate", "wakeVehicle"])
+          def test_every_command_method_skips(self, method, no_threads):
+              priority, master, ble, api = self.make(api_read_only=True)
+    +         setattr(ble, method, Mock(return_value=False))
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: COMMANDS = {
+    +     ),
+    +     "charge_start": (
+    +         "/command/charge_start",
+    +-        lambda api, vehicle: api.car_api_charge({"charge": True}),
+    ++        lambda api, vehicle: owner_provider(api).startCharging(vehicle.VIN),
+    +     ),
+    +     "charge_stop": (
+    +         "/command/charge_stop",
+    +-        lambda api, vehicle: api.car_api_charge({"charge": False}),
+    ++        lambda api, vehicle: owner_provider(api).stopCharging(vehicle.VIN),
+    +     ),
+    +     "wake_up": ("/wake_up", lambda api, vehicle: api.wakeVehicle(vehicle)),
+    + }
+    + 
+    + 
+    + def owner_provider(api):
+    +-    """The OwnerAPI provider: charge limits go through the reconciler's
+    +-    provider command methods, which send through commandSlotFor."""
+    ++    """The OwnerAPI provider: charge limits, starts and stops go through the
+    ++    reconciler's provider command methods, which send through
+    ++    commandSlotFor."""
+    +     return api.providers()[0]
+    + 
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: REFUSED_OUTCOME = Refusal("refused")
+    + REFUSED_RETURNS = {
+    +     "set_charging_amps": (False, False),
+    +     "set_charge_limit": (REFUSED_OUTCOME, REFUSED_OUTCOME),
+    +-    "charge_start": ("error", "error"),
+    +-    "charge_stop": ("error", "error"),
+    ++    "charge_start": (REFUSED_OUTCOME, REFUSED_OUTCOME),
+    ++    "charge_stop": (REFUSED_OUTCOME, REFUSED_OUTCOME),
+    +     "wake_up": (False, False),
+    + }
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         assert no_error_recorded(api)
+    +         assert signed.lastErrorTime == 0
+    + 
+    +-    def test_charge_reaches_only_the_unsigned_car(self, mixed_fleet, requests_mock):
+    ++    def test_stop_reaches_only_the_unsigned_car(self, mixed_fleet, requests_mock):
+    +         api, unsigned, signed = mixed_fleet
+    +         stop = requests_mock.post(re.compile(r".*/command/charge_stop"), json=ACCEPTED)
+    ++        provider = owner_provider(api)
+    + 
+    +-        # The signed car is refused, so the call as a whole fails and
+    +-        # VehiclePriority tries the next module.
+    +-        assert api.car_api_charge({"charge": False}) == "error"
+    ++        # The signed car is refused without a request, so the reconciler
+    ++        # tries the next provider for it.
+    ++        assert provider.stopCharging(signed.VIN) == REFUSED_OUTCOME
+    ++        assert stop.call_count == 0
+    ++        assert provider.stopCharging(unsigned.VIN).kind == "done"
+    +         assert stop.call_count == 1
+    +         assert (
+    +             stop.last_request.url
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: PRIORITY_CALLS = {
+    +         "/command/set_charging_amps",
+    +         lambda priority, vehicle: priority.setChargeRate(10, vehicle),
+    +     ),
+    +-    "car_api_charge": (
+    +-        "/command/charge_stop",
+    +-        lambda priority, vehicle: priority.car_api_charge({"charge": False}),
+    +-    ),
+    +     "wakeVehicle": (
+    +         "/wake_up",
+    +         lambda priority, vehicle: priority.wakeVehicle(vehicle),
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         else:
+    +             assert "Owner API no longer takes commands" in lines[0]
+    + 
+    +-    def test_wake_from_car_api_available_records_no_error(
+    +-        self, owner_car, requests_mock
+    +-    ):
+    ++    def test_wake_from_the_reconciler_records_no_error(self, owner_car, requests_mock):
+    +         api, vehicle = owner_car("off")
+    +         vehicle.lastAPIAccessTime = 0  # not known to be awake
+    +         # A live charge need whose pre-wake hold is long over
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/wake_up", status_code=403, json=VCP_403
+    +         )
+    + 
+    +-        api.car_api_available(charge=True)
+    ++        assert owner_provider(api).wake(vehicle.VIN) == REFUSED_OUTCOME
+    + 
+    +         assert wake.call_count == 1
+    +         assert vehicle.ownerCommandsRefused is True
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         "set_charging_amps": lambda body: body,
+    +         # A Fleet refusal is REFUSED (403, 412) or ERROR (410)
+    +         "set_charge_limit": lambda body: Refusal("refused", "error"),
+    +-        "charge_start": lambda body: "error",
+    +-        "charge_stop": lambda body: "error",
+    ++        "charge_start": lambda body: Refusal("refused", "error"),
+    ++        "charge_stop": lambda body: Refusal("refused", "error"),
+    +         "wake_up": lambda body: False,
+    +     }
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         api, vehicle = owner_car("off", fleet=fleet_token())
+    +         suffix, send = COMMANDS[command]
+    +         answer = self.FLEET_REFUSALS[refusal]
+    ++        # A stop first asks the free online state; an online car gets it
+    ++        requests_mock.get(OWNER_URL + "/5YJ3E1EA1KF000001", json=ONLINE)
+    +         cmd = requests_mock.post(FLEET_URL + "/5YJ3E1EA1KF000001" + suffix, **answer)
+    + 
+    +         assert send(api, vehicle) == self.FLEET_RETURNS[command](answer["json"])
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclesNotYetListed:
+    +         )
+    +         posts = requests_mock.register_uri("POST", rm.ANY, json={})
+    + 
+    +-        assert api.car_api_charge({"charge": False}) == "error"
+    ++        assert api.loadVehicleList() is True
+    ++        assert owner_provider(api).stopCharging("5YJ3E1EA1KF000001") == REFUSED_OUTCOME
+    + 
+    +         assert listing.call_count == 1
+    +         assert posts.call_count == 0
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +         api.setChargeRate(10, vehicle)
+    +         api.setChargeRate(12, vehicle)
+    +         api.wakeVehicle(vehicle)
+    +-        api.car_api_charge({"charge": True})
+    ++        owner_provider(api).startCharging(vehicle.VIN)
+    + 
+    +         lines = self.lines(caplog, "command_signing")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePriorityLogsWhy:
+    +     """When every listed car is read-only, VehiclePriority skips TeslaAPI
+    +     without calling it; the skip still logs the per-car reason once."""
+    + 
+    +-    @pytest.mark.parametrize("method", ["setChargeRate", "car_api_charge"])
+    ++    @pytest.mark.parametrize("method", ["setChargeRate"])
+    +     def test_one_line_naming_the_car(self, owner_car, any_http, caplog, method):
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car("required")
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePriorityLogsWhy:
+    +         setattr(ble, method, Mock(return_value=True))
+    +         calls = {
+    +             "setChargeRate": lambda priority: priority.setChargeRate(10, vehicle),
+    +-            "car_api_charge": lambda priority: priority.car_api_charge(
+    +-                {"charge": True}
+    +-            ),
+    +         }
+    + 
+    +         for _ in range(5):
+     
+      ## tests/unit/test_teslaapi_token_classification.py ##
+     @@ tests/unit/test_teslaapi_token_classification.py: class TestUnknownToken:
+    @@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+              assert time.monotonic() - start < 0.5
+     -
+     -
+    +-@pytest.fixture
+    +-def unlimited(q, monkeypatch):
+    +-    """Turn off the per-car charge interval for tests about other behaviour."""
+    +-    monkeypatch.setattr(q, "CHARGE_COMMAND_INTERVAL", 0)
+    +-    return q
+    +-
+    +-
+    +-def stop_for(vin=None):
+    +-    """The match TWCMaster.cancelStopCarsCharging uses: pending stops for this
+    +-    car and for every car; with no vin, every pending stop."""
+    +-    vin = vin or None
+    +-    return lambda task: not task.get("charge") and (
+    +-        vin is None or task.get("vin") in (vin, None)
+    +-    )
+    +-
+    +-
+     -class TestKeying:
+     -    def test_charge_keyed_per_vin(self, q, module):
+     -        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    @@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+     -            ("charge", True, "V2"),
+     -        ]
+     -
+    --    def test_none_vin_is_distinct_from_named_vin(self, q, module):
+    +-    def test_charge_commands_for_different_cars_both_run(self, unlimited, module):
+    +-        q = unlimited
+     -        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +-        q.put({"cmd": "charge", "charge": True, "vin": "V3"})
+    +-        module.gate.set()
+    +-        wait_idle(q)
+    +-        assert module.calls == [
+    +-            ("setAmps", 80, None),
+    +-            ("charge", False, "V1"),
+    +-            ("charge", False, "V2"),
+    +-            ("charge", True, "V3"),
+    +-        ]
+    +-
+    +-    def test_vehicleless_start_replaces_every_pending_stop(self, unlimited, module):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+     -        q.put({"cmd": "charge", "charge": True})
+    --        q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+     -        module.gate.set()
+     -        wait_idle(q)
+     -        assert module.calls == [
+     -            ("setAmps", 80, None),
+     -            ("charge", True, None),
+    --            ("charge", True, "V1"),
+     -        ]
+     -
+    +-    def test_stop_for_one_car_replaces_a_vehicleless_start(self, unlimited, module):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        q.put({"cmd": "charge", "charge": True})
+    +-        q.put({"cmd": "charge", "charge": True, "vin": "V2"})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        module.gate.set()
+    +-        wait_idle(q)
+    +-        # The start for every car overlapped V1's stop; V2's own start did not.
+    +-        assert module.calls == [
+    +-            ("setAmps", 80, None),
+    +-            ("charge", False, "V1"),
+    +-            ("charge", True, "V2"),
+    +-        ]
+    +-
+    +-    def test_empty_vin_means_every_car(self, unlimited, module):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": ""})
+    +-        module.gate.set()
+    +-        wait_idle(q)
+    +-        assert module.calls == [
+    +-            ("setAmps", 80, None),
+    +-            ("charge", False, ""),
+    +-        ]
+    +-
+    +-
+     -class TestCancel:
+     -    def test_cancel_removes_matching_pending_entries(self, q, module):
+     -        block_worker(q, module, {"cmd": "setChargeRate", "amps": 6, "vehicle": None})
+    @@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+     -            ("setAmps", 80, None),
+     -            ("setChargeRate", 10, None),
+     -        ]
+    +-
+    +-    def test_cancels_pending_stop_for_the_car(self, unlimited, module):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +-        assert q.cancel("charge", stop_for("V1")) == 1
+    +-        module.gate.set()
+    +-        wait_idle(q)
+    +-        assert module.calls == [
+    +-            ("setAmps", 80, None),
+    +-            ("charge", False, "V2"),
+    +-        ]
+    +-
+    +-    def test_cancels_a_stop_for_every_car(self, unlimited, module):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": None})
+    +-        assert q.cancel("charge", stop_for("V1")) == 1
+    +-        module.gate.set()
+    +-        wait_idle(q)
+    +-        assert module.calls == [("setAmps", 80, None)]
+    +-
+    +-    @pytest.mark.parametrize("vin", [None, ""])
+    +-    def test_without_vin_cancels_every_stop(self, unlimited, module, vin):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +-        assert q.cancel("charge", stop_for(vin)) == 2
+    +-        module.gate.set()
+    +-        wait_idle(q)
+    +-        assert module.calls == [("setAmps", 80, None)]
+    +-
+    +-    def test_leaves_starts_and_other_commands(self, unlimited, module):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setChargeRate", "amps": 6, "vehicle": None})
+    +-        q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    +-        q.put({"cmd": "setAmps", "vin": None, "amps": 80})
+    +-        assert q.cancel("charge", stop_for("V1")) == 0
+    +-        module.gate.set()
+    +-        wait_idle(q)
+    +-        assert module.calls == [
+    +-            ("setChargeRate", 6, None),
+    +-            ("charge", True, "V1"),
+    +-            ("setAmps", 80, None),
+    +-        ]
+    +-
+    +-    def test_stops_are_not_cancelled_during_shutdown(self, unlimited, module):
+    +-        q = unlimited
+    +-        block_worker(q, module, {"cmd": "setChargeRate", "amps": 6, "vehicle": None})
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        drainer = threading.Thread(target=lambda: q.drain_high_priority(timeout=WAIT))
+    +-        drainer.start()
+    +-        deadline = time.monotonic() + WAIT
+    +-        while not q._draining and time.monotonic() < deadline:
+    +-            time.sleep(0.005)
+    +-        assert q.cancel("charge", stop_for("V1")) == 0
+    +-        module.gate.set()
+    +-        drainer.join(WAIT)
+    +-        assert module.calls == [("setChargeRate", 6, None), ("charge", False, "V1")]
+    +-
+    +-
+    +-class TestChargeInterval:
+    +-    def test_repeat_within_interval_is_dropped(self, q, module):
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        assert module.calls == [("charge", False, "V1")]
+    +-
+    +-    def test_other_car_is_not_limited(self, q, module):
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +-        wait_idle(q)
+    +-        assert module.calls == [("charge", False, "V1"), ("charge", False, "V2")]
+    +-
+    +-    def test_vehicleless_command_waits_for_any_car(self, q, module):
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        q.put({"cmd": "charge", "charge": True})
+    +-        wait_idle(q)
+    +-        assert module.calls == [("charge", False, "V1")]
+    +-
+    +-    def test_runs_again_after_interval(self, q, module, monkeypatch):
+    +-        clock = [1000.0]
+    +-        monkeypatch.setattr(
+    +-            "TWCManager.VehicleCommandQueue.time.monotonic", lambda: clock[0]
+    +-        )
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        clock[0] += q.CHARGE_COMMAND_INTERVAL - 1
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        clock[0] += 1
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        assert module.calls == [("charge", False, "V1"), ("charge", False, "V1")]
+    +-
+    +-    def test_failed_attempt_counts(self, q, module):
+    +-        module.result = False
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        assert module.calls == [("charge", False, "V1")]
+    +-
+    +-    def test_shutdown_stop_ignores_interval(self, q, module):
+    +-        q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    +-        wait_idle(q)
+    +-        q._draining = True
+    +-        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +-        assert q.drain_high_priority(timeout=WAIT) is True
+    +-        assert module.calls == [("charge", True, "V1"), ("charge", False, "V1")]
+     
+      ## tests/unit/test_vehicle_priority.py ##
+     @@ tests/unit/test_vehicle_priority.py: def test_command_policy_properties_delegate():
+ 7:  599b1e69 !  7:  73f7699b Set charge amps through desired state and delete the legacy rate path
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TLS13Adapter(HTTPAdapter):
+          # The energy-site list (/products) is fetched at most this often (seconds)
+          ENERGY_SITES_TTL = 3600
+          # Seconds a free energy-site request may take (background thread)
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +     COMMAND_UNREACHABLE_REASONS = ("could_not_wake_buses", "vehicle_unavailable")
+    +     # Seconds between failed wake_up attempts on one car (a wake is $0.02)
+    +     WAKE_RETRY_SECONDS = 30 * 60
+    ++    # fleetSlot.changes when the module-wide read-only line was last logged
+    ++    refusalLoggedAt = None
+    +     regionURL = {
+    +         "NA": "https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/vehicles",
+    +         "EU": "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/vehicles",
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          # One slot per token type; built in __init__.
+          ownerSlot = None
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          refreshClientID = ""
+          # FleetAPI OAuth (authorization code) login. Two variants, auto-selected by
+          # whether a client secret is configured:
+    -@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -             return ("fleet", "NA")
+    -         return ("unknown", None)
+    - 
+    --    def refuseCommandIfReadOnly(self, command):
+    --        # True when no usable Fleet API token can send vehicle commands.
+    --        # Logs at INFO once per Fleet slot change, makes no HTTP call and
+    --        # records no API error (an error would start the backoff that also
+    --        # blocks reads).
+    --        if not self.readOnly:
+    --            return False
+    --        if self.fleetSlot.changes != self.refusalLoggedAt:
+    --            logger.info(
+    --                "Tesla API is read-only (no usable Fleet API token); not sending "
+    --                + command
+    --                + " or any other vehicle command. Commands need a Fleet API "
+    --                "token or the TeslaBLE module."
+    --            )
+    --            self.refusalLoggedAt = self.fleetSlot.changes
+    --        return True
+    --
+    -     def applySyncedToken(self, accessToken):
+    -         # Entry point for token sync sources (TeslaMate): the access token
+    -         # only, so a synced slot never refreshes. Accepted whether or not
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              vehicle.firstChargeNeededTime = 0
+              vehicle.delayNextWakeAttempt = 0
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -        if not vehicle:
+     -            vehicles = self.getCarApiVehicles()
+     -            if not vehicles:
+    --                logger.error("No Tesla vehicles available to set charge rate")
+    +-                # Expected until a command or telemetry lists them, and
+    +-                # VehiclePriority calls this every tick: not an error.
+    +-                logger.log(
+    +-                    logging.INFO2, "No Tesla vehicles available to set charge rate"
+    +-                )
+     -                return False
+     -            vehicle = vehicles[0]
+     -
+    --        slot = self.slotFor("command")
+    --        if slot is None:
+    +-        if self.refuseCommandFor(vehicle, "set_charging_amps"):
+     -            return False
+    +-        slot = self.commandSlotFor(vehicle)
+     -
+     -        # The Fleet API takes whole amps. The web debug path passes the
+     -        # rate through from JSON, so it may be a numeric string.
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -
+     -        body = {"charging_amps": charge_rate}
+     -
+    +-        req = None
+     -        try:
+     -            req = requests.post(
+     -                url, headers=headers, json=body, verify=slot.verifyCert, timeout=10
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -        except requests.exceptions.RequestException:
+     -            return False
+     -        except json.decoder.JSONDecodeError:
+    +-            # Not JSON (e.g. an empty or HTML 403); the refusal check below
+    +-            # still sees the status.
+    +-            apiResponseDict = None
+    +-
+    +-        if slot is self.ownerSlot and self.noteOwnerCommandRefused(vehicle, req):
+    +-            return False
+    +-        if apiResponseDict is None:
+     -            return False
+     -
+     -        accepted = self._chargeRateAccepted(apiResponseDict)
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                      return
+      
+     -    def wakeVehicle(self, vehicle):
+    --        if self.refuseCommandIfReadOnly("wake_up"):
+    +-        if self.refuseCommandFor(vehicle, "wake_up"):
+     -            return False
+    --        slot = self.slotFor("command")
+    --        if slot is None or not slot.usable("wake"):
+    +-        slot = self.commandSlotFor(vehicle)
+    +-        if slot is self.fleetSlot and not slot.usable("wake"):
+    +-            # Tesla refused a wake with this token (403); an Owner refusal is
+    +-            # noted per car instead
+     -            return False
+     -        apiResponseDict = None
+     -        vehicle.lastAPIAccessTime = time.time()
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -            req = requests.post(url, headers=headers, verify=slot.verifyCert)
+     -            logger.log(logging.INFO8, "Car API cmd wake_up" + str(req))
+     -            req.raise_for_status()
+    +-            if slot is self.ownerSlot and self.noteOwnerCommandRefused(vehicle, req):
+    +-                # A 2xx carrying the refusal error.
+    +-                return False
+     -            apiResponseDict = json.loads(req.text)
+     -        except requests.exceptions.RequestException:
+     -            if req is None:
+     -                # The request never went out (e.g. no network).
+     -                pass
+    +-            elif slot is self.ownerSlot and self.noteOwnerCommandRefused(vehicle, req):
+    +-                pass
+     -            elif req.status_code == 401 and "expired" in req.text:
+     -                # If the token is expired, refresh it and try again
+     -                if self.refreshSlot(slot) == "success":
+    @@ tests/unit/test_teslaapi_chargerate.py (deleted)
+     -    post.assert_not_called()
+     
+      ## tests/unit/test_teslaapi_readonly_gate.py ##
+    -@@ tests/unit/test_teslaapi_readonly_gate.py: Read-only command gate.
+    - While TeslaAPI holds no usable Fleet API token (readOnly), e.g. only an
+    - Owner API token, no vehicle command may reach Tesla: the provider order keeps
+    - FleetAPI out of every command walk, and
+    --TeslaAPI's own command entry points refuse without an HTTP call and without
+    -+the Fleet provider's commands refuse without an HTTP call and without
+    - recording an API error (which would back off reads too). Reads still run.
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: missing, or a value never seen) is read-only, as is every vehicle when no
+    + token can command: no vehicle command may reach Tesla. The provider order
+    + keeps TeslaAPI out of a command walk for a read-only car (OwnerAPI is not
+    + ready for it) and out of every broadcast while every listed car is
+    +-read-only (neither provider is available), and TeslaAPI's own command entry
+    +-points refuse per vehicle without an HTTP call and without recording an API
+    +-error (which would back off reads too). Reads still run.
+    ++read-only (neither provider is available), and the providers' commands
+    ++refuse per vehicle without an HTTP call and without recording an API error
+    ++(which would back off reads too). Reads still run.
+      """
+      
+    -@@ tests/unit/test_teslaapi_readonly_gate.py: from unittest.mock import Mock
+    + import logging
+    +-import time
+    + import re
+    ++import time
+    + from unittest.mock import Mock
+    + 
+      import pytest
+      import requests_mock as rm
+      
+    -+from TWCManager.Vehicle.Reconcile.Outcome import DONE, REFUSED, Outcome
+    ++from TWCManager.Vehicle.Providers import Capability as C
+    ++from TWCManager.Vehicle.Reconcile.Outcome import DONE, REFUSED, UNSUPPORTED, Outcome
+     +
+      from tests.unit.teslatokens import (
+    +     FLEET_NA_URL as FLEET_URL,
+          OWNER_API_URL as OWNER_URL,
+    -     add_home_vehicle,
+     @@ tests/unit/test_teslaapi_readonly_gate.py: def no_error_recorded(api):
+          return api.getCarApiLastErrorTime() == 0 and vehicle.lastErrorTime == 0
+      
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+      
+      
+     -class TestVehiclePrioritySkipsReadOnly:
+    --    # The facade walks the provider order: an Owner-only TeslaAPI has no
+    --    # command slot, so FleetAPIProvider.available() keeps every broadcast
+    --    # command away from it; reads still go through the Owner slot.
+    +-    # The facade walks the provider order: an Owner-only TeslaAPI whose
+    +-    # listed car needs signed commands has no provider available for a
+    +-    # command, so every broadcast command stays away from it; reads still
+    +-    # go through the Owner slot.
+     -    def make(self, api_read_only):
+     +class TestCheckChargeRefreshesEachModuleOnce:
+     +    # checkCharge walks the provider order: each vehicle module with a
+     +    # provider not suppressed for reads refreshes its cars once
+     +    def make(self, settings=None):
+              from tests.unit.test_carapivehicle_registry import api_with_registry
+    +-        from TWCManager.Vehicle.Providers import Capability as C
+     +        from TWCManager.TWCMaster import TWCMaster
+    -         from TWCManager.Vehicle.Providers import Capability as C
+              from TWCManager.Vehicle.Providers.Order import ProviderOrder
+              from TWCManager.Vehicle.Providers.Provider import Provider
+     -        from TWCManager.Vehicle.VehiclePriority import VehiclePriority
+      
+              api, reg = api_with_registry()
+     -        api.storeToken(owner_token() if api_read_only else fleet_token())
+    ++        api.storeToken(owner_token())
+    +         add_home_vehicle(api, "required")
+     -        assert api.readOnly is api_read_only
+     -        api.setChargeRate = Mock(return_value=True)
+     -        api.updateChargeAtHome = Mock(return_value=True)
+    -+        api.storeToken(owner_token())
+     +        assert api.readOnly is True
+     +        api.updateChargeAtHome = Mock()
+              ble = Mock()
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+     -        assert priority.setChargeRate(10) is True
+     -        assert api.setChargeRate.called
+     -
+    --    @pytest.mark.parametrize(
+    --        "method", ["setChargeRate", "wakeVehicle"]
+    --    )
+    +-    @pytest.mark.parametrize("method", ["setChargeRate", "wakeVehicle"])
+     -    def test_every_command_method_skips(self, method, no_threads):
+     -        priority, master, ble, api = self.make(api_read_only=True)
+     -        setattr(ble, method, Mock(return_value=False))
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+     +        ble, api = self.make({"commandPolicy": "api_only"})
+     +        assert api.updateChargeAtHome.call_count == 1
+     +        assert not ble.updateChargeAtHome.called
+    + 
+    + 
+    + # What Tesla answers a REST command for a car that needs signed commands.
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: VCP_403 = {
+    + ACCEPTED = {"response": {"result": True, "reason": ""}}
+    + ONLINE = {"response": {"state": "online"}}
+    + 
+    ++
+    ++def tesla_provider(api):
+    ++    """Either of TeslaAPI's providers: the command methods are shared and
+    ++    send through commandSlotFor, the slot that may command the car."""
+    ++    return api.providers()[0]
+    ++
+    ++
+    + # Each owner-command path: the endpoint under /5YJ3E1EA1KF000001 and how to send it.
+    + COMMANDS = {
+    +     "set_charging_amps": (
+    +         "/command/set_charging_amps",
+    +-        lambda api, vehicle: api.setChargeRate(10, vehicle),
+    ++        lambda api, vehicle: tesla_provider(api).setAmps(vehicle.VIN, 10),
+    +     ),
+    +     "set_charge_limit": (
+    +         "/command/set_charge_limit",
+    +-        lambda api, vehicle: owner_provider(api).setChargeLimit(vehicle.VIN, 80),
+    ++        lambda api, vehicle: tesla_provider(api).setChargeLimit(vehicle.VIN, 80),
+    +     ),
+    +     "charge_start": (
+    +         "/command/charge_start",
+    +-        lambda api, vehicle: owner_provider(api).startCharging(vehicle.VIN),
+    ++        lambda api, vehicle: tesla_provider(api).startCharging(vehicle.VIN),
+    +     ),
+    +     "charge_stop": (
+    +         "/command/charge_stop",
+    +-        lambda api, vehicle: owner_provider(api).stopCharging(vehicle.VIN),
+    ++        lambda api, vehicle: tesla_provider(api).stopCharging(vehicle.VIN),
+    ++    ),
+    ++    "wake_up": (
+    ++        "/wake_up",
+    ++        lambda api, vehicle: tesla_provider(api).wake(vehicle.VIN),
+    +     ),
+    +-    "wake_up": ("/wake_up", lambda api, vehicle: api.wakeVehicle(vehicle)),
+    + }
+    + 
+    + 
+    +-def owner_provider(api):
+    +-    """The OwnerAPI provider: charge limits, starts and stops go through the
+    +-    reconciler's provider command methods, which send through
+    +-    commandSlotFor."""
+    +-    return api.providers()[0]
+    ++def prime(command, api, vehicle, requests_mock, state="asleep"):
+    ++    """A wake first asks the free online state and goes out only for a car
+    ++    not known to be online whose charge need is live and past its grace."""
+    ++    if command != "wake_up":
+    ++        return
+    ++    vehicle.lastAPIAccessTime = 0
+    ++    vehicle.firstChargeNeededTime = 1
+    ++    vehicle.lastChargeNeededTime = time.time()
+    ++    for base in (OWNER_URL, FLEET_URL):
+    ++        requests_mock.get(base + "/" + vehicle.VIN, json={"response": {"state": state}})
+    + 
+    + 
+    + class Refusal:
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class Refusal:
+    +         return getattr(other, "kind", None) in self.kinds
+    + 
+    + 
+    +-REFUSED_OUTCOME = Refusal("refused")
+    ++REFUSED_OUTCOME = Refusal(REFUSED)
+    + 
+    + # What each command path returns when Tesla refuses it (and latches the
+    +-# car), then when it is refused locally afterwards. VehiclePriority and the
+    +-# reconciler treat all of these as failure.
+    +-REFUSED_RETURNS = {
+    +-    "set_charging_amps": (False, False),
+    +-    "set_charge_limit": (REFUSED_OUTCOME, REFUSED_OUTCOME),
+    +-    "charge_start": (REFUSED_OUTCOME, REFUSED_OUTCOME),
+    +-    "charge_stop": (REFUSED_OUTCOME, REFUSED_OUTCOME),
+    +-    "wake_up": (False, False),
+    +-}
+    ++# car), then when it is refused locally afterwards. The reconciler treats a
+    ++# REFUSED outcome as excluding the provider.
+    ++REFUSED_RETURNS = {command: (REFUSED_OUTCOME, REFUSED_OUTCOME) for command in COMMANDS}
+    + 
+    + # Owner API answers that mean the car needs signed commands: HTTP 403 with
+    + # or without a JSON body, or the Vehicle Command Protocol error.
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def reply_for(command):
+    +     return ONLINE if command == "wake_up" else ACCEPTED
+    + 
+    + 
+    +-def allow_resend(api, vehicle):
+    +-    # Clears the once-a-minute and once-applied guards between two sends.
+    +-    api.carApiLastStartOrStopChargeTime = 0
+    +-    api.carApiLastChargeLimitApplyTime = 0
+    +-    vehicle.lastLimitAttemptTime = 0
+    +-    vehicle.stopTryingToApplyLimit = False
+    +-    vehicle.stopAskingToStartCharging = False
+    +-    vehicle.lastChargeRateSent = None
+    +-
+    +-
+    + @pytest.fixture
+    + def no_sleep(monkeypatch):
+    +     import TWCManager.Vehicle.TeslaAPI as teslaapi
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def owner_car(no_threads, no_sleep):
+    +     return make
+    + 
+    + 
+    +-def priority_over(api, ble):
+    +-    """VehiclePriority walking the provider order: TeslaAPI's providers, then
+    +-    a mock fallback module ranked after them, as HomeAssistant is."""
+    +-    from TWCManager.Vehicle.Providers import Capability as C
+    ++def order_over(api):
+    ++    """The provider order the reconciler walks: TeslaAPI's providers, then a
+    ++    fallback provider ranked after them, as HomeAssistant is."""
+    +     from TWCManager.Vehicle.Providers.Order import ProviderOrder
+    +     from TWCManager.Vehicle.Providers.Provider import Provider
+    +-    from TWCManager.Vehicle.VehiclePriority import VehiclePriority
+    + 
+    +     class Fallback(Provider):
+    +-        name, rank, local, module = "Fallback", 6, False, ble
+    ++        name, rank, local = "Fallback", 6, False
+    + 
+    +         def declarations(self):
+    +             return {c: C.Declaration(C.HA_BILLED) for c in C.COMMANDS}
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def priority_over(api, ble):
+    + 
+    +     master = api.master
+    +     master.vehicleRegistry = api.registry
+    +-    master.providerOrder = ProviderOrder(master)
+    ++    order = ProviderOrder(master)
+    +     for p in api.providers() + [Fallback()]:
+    +-        master.providerOrder.register(p)
+    +-    return VehiclePriority(master)
+    ++        order.register(p)
+    ++    return order
+    ++
+    ++
+    ++def amps_candidates(api, vehicle):
+    ++    """Who may set this car's amps, in order."""
+    ++    return [p.name for p in order_over(api).candidates(vehicle.vehicle, C.SET_AMPS)]
+    + 
+    + 
+    + class TestOwnerCommandsForUnsignedVehicles:
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandsForUnsignedVehicles:
+    +     ):
+    +         api, vehicle = owner_car("off")
+    +         suffix, send = COMMANDS[command]
+    ++        prime(command, api, vehicle, requests_mock)
+    +         cmd = requests_mock.post(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, json=reply_for(command)
+    +         )
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandsForUnsignedVehicles:
+    +         send(api, vehicle)
+    + 
+    +         assert cmd.call_count == 1
+    +-        assert requests_mock.call_count == 1
+    +         bearer = cmd.last_request.headers["Authorization"]
+    +         assert bearer == "Bearer " + api.ownerSlot.accessToken
+    +         assert no_error_recorded(api)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandsForUnsignedVehicles:
+    +         cmd = requests_mock.post(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps", json=ACCEPTED
+    +         )
+    +-        assert api.setChargeRate(10, vehicle) == ACCEPTED
+    ++        assert tesla_provider(api).setAmps(vehicle.VIN, 10) == Outcome(DONE)
+    +         assert cmd.call_count == 1
+    + 
+    +     def test_cleared_owner_slot_blocks(self, owner_car, any_http):
+    +         api, vehicle = owner_car("off")
+    +         api.ownerSlot.clear()
+    +         assert api.readOnlyFor(vehicle) is True
+    +-        assert api.setChargeRate(10, vehicle) is False
+    ++        assert tesla_provider(api).setAmps(vehicle.VIN, 10) == REFUSED_OUTCOME
+    +         assert any_http.call_count == 0
+    + 
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestRefusedVehicles:
+    + 
+    +         assert api.readOnly is True
+    +         assert api.readOnlyFor(vehicle) is True
+    +-        assert send(api, vehicle) in (False, "error", REFUSED_OUTCOME)
+    ++        assert send(api, vehicle) in (False, REFUSED_OUTCOME)
+    + 
+    +         assert any_http.call_count == 0
+    +         assert no_error_recorded(api)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         amps = requests_mock.post(
+    +             re.compile(r".*/command/set_charging_amps"), json=ACCEPTED
+    +         )
+    ++        provider = tesla_provider(api)
+    + 
+    +         assert api.readOnly is False
+    +         assert api.readOnlyFor(unsigned) is False
+    +         assert api.readOnlyFor(signed) is True
+    +-        assert api.setChargeRate(10, signed) is False
+    ++        assert provider.setAmps(signed.VIN, 10) == REFUSED_OUTCOME
+    +         assert amps.call_count == 0
+    +-        assert api.setChargeRate(10, unsigned) == ACCEPTED
+    ++        assert provider.setAmps(unsigned.VIN, 10) == Outcome(DONE)
+    +         assert amps.call_count == 1
+    +         assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    +         assert no_error_recorded(api)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +     def test_stop_reaches_only_the_unsigned_car(self, mixed_fleet, requests_mock):
+    +         api, unsigned, signed = mixed_fleet
+    +         stop = requests_mock.post(re.compile(r".*/command/charge_stop"), json=ACCEPTED)
+    +-        provider = owner_provider(api)
+    ++        provider = tesla_provider(api)
+    + 
+    +         # The signed car is refused without a request, so the reconciler
+    +         # tries the next provider for it.
+    +         assert provider.stopCharging(signed.VIN) == REFUSED_OUTCOME
+    +         assert stop.call_count == 0
+    +-        assert provider.stopCharging(unsigned.VIN).kind == "done"
+    ++        assert provider.stopCharging(unsigned.VIN) == Outcome(DONE)
+    +         assert stop.call_count == 1
+    +         assert (
+    +             stop.last_request.url
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         assert signed.lastErrorTime == 0
+    +         assert no_error_recorded(api)
+    + 
+    +-    def test_vehicle_priority_falls_through_for_signed_car(self, mixed_fleet, any_http):
+    ++    def test_order_leaves_out_tesla_api_for_the_signed_car(self, mixed_fleet, any_http):
+    +         api, unsigned, signed = mixed_fleet
+    +-        ble = Mock()
+    +-        ble.setChargeRate = Mock(return_value=True)
+    +-        priority = priority_over(api, ble)
+    +-
+    +-        assert priority.setChargeRate(10, signed) is True
+    +-        ble.setChargeRate.assert_called_with(10, signed)
+    ++        assert amps_candidates(api, signed) == ["Fallback"]
+    +         assert any_http.call_count == 0
+    +         assert no_error_recorded(api)
+    +         assert signed.lastErrorTime == 0
+    + 
+    +-    def test_vehicle_priority_uses_tesla_api_for_unsigned_car(
+    +-        self, mixed_fleet, requests_mock
+    +-    ):
+    ++    def test_order_puts_owner_api_first_for_the_unsigned_car(self, mixed_fleet):
+    +         api, unsigned, signed = mixed_fleet
+    +-        amps = requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps", json=ACCEPTED
+    +-        )
+    +-        ble = Mock()
+    +-        ble.setChargeRate = Mock(return_value=True)
+    +-        priority = priority_over(api, ble)
+    +-
+    +-        assert priority.setChargeRate(10, unsigned) == ACCEPTED
+    +-        assert amps.call_count == 1
+    +-        assert not ble.setChargeRate.called
+    ++        assert amps_candidates(api, unsigned) == ["OwnerAPI", "Fallback"]
+    + 
+    +     def test_endpoint_read_only_per_vehicle(self, mixed_fleet):
+    +         from TWCManager.EVSEInstance.VehicleEndpoint import VehicleEndpoint
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         assert VehicleEndpoint(signed.vehicle, order, api.master).isReadOnly is True
+    + 
+    + 
+    +-# Each owner-command path as VehiclePriority calls it: the endpoint under
+    +-# /5YJ3E1EA1KF000001 and how to call it.
+    +-PRIORITY_CALLS = {
+    +-    "setChargeRate": (
+    +-        "/command/set_charging_amps",
+    +-        lambda priority, vehicle: priority.setChargeRate(10, vehicle),
+    +-    ),
+    +-    "wakeVehicle": (
+    +-        "/wake_up",
+    +-        lambda priority, vehicle: priority.wakeVehicle(vehicle),
+    +-    ),
+    +-}
+    +-
+    +-
+    + class TestOwnerCommandRefusedByTesla:
+    +     """A car listed with command_signing "off" whose Owner API command Tesla
+    +     refuses anyway: 403 or "Vehicle Command Protocol required" (needs signed
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         api, vehicle = owner_car("off")
+    +         suffix, send = COMMANDS[command]
+    +         first, after = REFUSED_RETURNS[command]
+    ++        prime(command, api, vehicle, requests_mock)
+    +         cmd = requests_mock.post(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, **ALL_REFUSALS[refusal]
+    +         )
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         assert send(api, vehicle) == first
+    + 
+    +         assert cmd.call_count == 1
+    +-        assert requests_mock.call_count == 1
+    +         assert vehicle.ownerCommandsRefused is True
+    +         assert no_error_recorded(api)
+    +         assert api.readOnlyFor(vehicle) is True
+    +         assert api.readOnly is True
+    + 
+    +-        allow_resend(api, vehicle)
+    +         assert send(api, vehicle) == after
+    +-        assert requests_mock.call_count == 1
+    ++        assert cmd.call_count == 1
+    +         assert no_error_recorded(api)
+    + 
+    +-        # Reads still run on the Owner token.
+    ++        # Reads still run on the Owner token (of a car known awake: a read
+    ++        # of an asleep car is never attempted).
+    +         assert api.ownerSlot.usable("read")
+    ++        vehicle.lastAPIAccessTime = time.time()
+    ++        vehicle.firstWakeAttemptTime = 0
+    +         data = requests_mock.get(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/vehicle_data", json=VEHICLE_DATA
+    +         )
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    +             **ALL_REFUSALS[refusal]
+    +         )
+    +-        api.setChargeRate(10, vehicle)
+    ++        tesla_provider(api).setAmps(vehicle.VIN, 10)
+    + 
+    +         warnings = [
+    +             r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         # The per-car read-only line, logged again on a state change, gives
+    +         # the same cause.
+    +         vehicle.refusalLoggedAt = None
+    +-        api.setChargeRate(12, vehicle)
+    ++        tesla_provider(api).setAmps(vehicle.VIN, 12)
+    +         lines = [
+    +             r.getMessage()
+    +             for r in caplog.records
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/wake_up", status_code=403, json=VCP_403
+    +         )
+    + 
+    +-        assert owner_provider(api).wake(vehicle.VIN) == REFUSED_OUTCOME
+    ++        assert tesla_provider(api).wake(vehicle.VIN) == REFUSED_OUTCOME
+    + 
+    +         assert wake.call_count == 1
+    +         assert vehicle.ownerCommandsRefused is True
+    +         assert no_error_recorded(api)
+    + 
+    +     @pytest.mark.parametrize("refusal", list(ALL_REFUSALS))
+    +-    @pytest.mark.parametrize("method", list(PRIORITY_CALLS))
+    +-    def test_vehicle_priority_falls_through_and_reads_still_work(
+    +-        self, owner_car, requests_mock, method, refusal
+    ++    def test_latched_car_leaves_the_order_and_reads_still_work(
+    ++        self, owner_car, requests_mock, refusal
+    +     ):
+    +         api, vehicle = owner_car("off")
+    +-        suffix, call = PRIORITY_CALLS[method]
+    +         cmd = requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, **ALL_REFUSALS[refusal]
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    ++            **ALL_REFUSALS[refusal]
+    +         )
+    +-        ble = Mock()
+    +-        setattr(ble, method, Mock(return_value=True))
+    ++        assert amps_candidates(api, vehicle) == ["OwnerAPI", "Fallback"]
+    + 
+    +-        assert call(priority_over(api, ble), vehicle) is True
+    ++        assert tesla_provider(api).setAmps(vehicle.VIN, 10) == REFUSED_OUTCOME
+    +         assert cmd.call_count == 1
+    +-        assert getattr(ble, method).call_count == 1
+    + 
+    +-        # Latched: the next command skips TeslaAPI without an HTTP call.
+    +-        allow_resend(api, vehicle)
+    +-        assert call(priority_over(api, ble), vehicle) is True
+    ++        # Latched: the next walk leaves TeslaAPI out without an HTTP call.
+    ++        assert amps_candidates(api, vehicle) == ["Fallback"]
+    +         assert requests_mock.call_count == 1
+    +-        assert getattr(ble, method).call_count == 2
+    +         assert no_error_recorded(api)
+    + 
+    +         data = requests_mock.get(
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         "410": {"status_code": 410, "json": {"response": None, "error": "gone"}},
+    +         "412 fleetapi json": {"status_code": 412, "json": FLEETAPI_ONLY},
+    +     }
+    +-    # What each path returns for those answers, as before the latch.
+    +-    FLEET_RETURNS = {
+    +-        "set_charging_amps": lambda body: body,
+    +-        # A Fleet refusal is REFUSED (403, 412) or ERROR (410)
+    +-        "set_charge_limit": lambda body: Refusal("refused", "error"),
+    +-        "charge_start": lambda body: Refusal("refused", "error"),
+    +-        "charge_stop": lambda body: Refusal("refused", "error"),
+    +-        "wake_up": lambda body: False,
+    +-    }
+    ++    # A Fleet refusal is REFUSED (403, 412) or ERROR (410); a refused wake is
+    ++    # UNREACHABLE, so Fleet still carries commands that need no wake
+    ++    FLEET_REFUSED = Refusal("refused", "error", "unreachable")
+    + 
+    +     @pytest.mark.parametrize("refusal", list(FLEET_REFUSALS))
+    +     @pytest.mark.parametrize("command", list(COMMANDS))
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         answer = self.FLEET_REFUSALS[refusal]
+    +         # A stop first asks the free online state; an online car gets it
+    +         requests_mock.get(OWNER_URL + "/5YJ3E1EA1KF000001", json=ONLINE)
+    ++        prime(command, api, vehicle, requests_mock)
+    +         cmd = requests_mock.post(FLEET_URL + "/5YJ3E1EA1KF000001" + suffix, **answer)
+    + 
+    +-        assert send(api, vehicle) == self.FLEET_RETURNS[command](answer["json"])
+    ++        assert send(api, vehicle) == self.FLEET_REFUSED
+    + 
+    +         assert cmd.call_count >= 1
+    +         assert vehicle.ownerCommandsRefused is False
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestBothTokens:
+    +         )
+    + 
+    +         assert api.commandSlotFor(vehicle) is api.fleetSlot
+    +-        api.setChargeRate(10, vehicle)
+    ++        tesla_provider(api).setAmps(vehicle.VIN, 10)
+    + 
+    +         assert amps.call_count == 1
+    +         assert amps.last_request.url.startswith(FLEET_URL + "/5YJ3E1EA1KF000001/")
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestBothTokens:
+    +         )
+    + 
+    +         assert api.commandSlotFor(vehicle) is api.ownerSlot
+    +-        api.setChargeRate(10, vehicle)
+    ++        tesla_provider(api).setAmps(vehicle.VIN, 10)
+    +         assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    + 
+    +     def test_fleet_carries_commands_for_signed_car(self, owner_car):
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestBothTokens:
+    + 
+    + class TestVehiclesNotYetListed:
+    +     """Whether an Owner token can command is only known once the vehicles
+    +-    are listed, and only a command path lists them (unless telemetry does),
+    +-    so TeslaAPI is not read-only while the list is empty."""
+    ++    are listed, and only a read path lists them (unless telemetry does), so
+    ++    TeslaAPI is not read-only while the list is empty."""
+    + 
+    +     def test_owner_only_read_only_once_listed(self, no_threads):
+    +         api = new_api()
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclesNotYetListed:
+    +     def test_no_token_is_read_only_unlisted(self):
+    +         assert new_api().readOnly is True
+    + 
+    +-    def test_set_charge_rate_without_vehicles_logs_no_error(
+    +-        self, no_threads, any_http, caplog
+    +-    ):
+    +-        # VehiclePriority calls setChargeRate every tick while the list is
+    +-        # empty; that is expected, not an error. setChargeRate does not list
+    +-        # the vehicles itself, so it makes no HTTP call.
+    ++    def test_command_without_vehicles_logs_no_error(self, no_threads, any_http, caplog):
+    ++        # The reconciler asks every cycle while the list is empty; that is
+    ++        # expected, not an error, and lists nothing itself.
+    +         caplog.set_level(logging.DEBUG)
+    +         api = new_api()
+    +         api.storeToken(owner_token())
+    +-        ble = Mock()
+    +-        ble.setChargeRate = Mock(return_value=True)
+    + 
+    +         for _ in range(3):
+    +-            assert priority_over(api, ble).setChargeRate(10) is True
+    ++            assert tesla_provider(api).setAmps("5YJ3E1EA1KF000001", 10) == Outcome(
+    ++                UNSUPPORTED, "not listed"
+    ++            )
+    + 
+    +-        assert ble.setChargeRate.call_count == 3
+    +         assert any_http.call_count == 0
+    +         assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    +-        lines = [r for r in caplog.records if "No Tesla vehicles" in r.getMessage()]
+    +-        assert lines and all(r.levelno == logging.INFO2 for r in lines)
+    + 
+    +-    def test_command_lists_vehicles_then_refuses_signed_car(
+    +-        self, no_threads, no_sleep, requests_mock
+    +-    ):
+    ++    def test_listing_then_refuses_signed_car(self, no_threads, no_sleep, requests_mock):
+    +         api = new_api()
+    +         api.storeToken(owner_token())
+    +         listing = requests_mock.get(
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclesNotYetListed:
+    +         posts = requests_mock.register_uri("POST", rm.ANY, json={})
+    + 
+    +         assert api.loadVehicleList() is True
+    +-        assert owner_provider(api).stopCharging("5YJ3E1EA1KF000001") == REFUSED_OUTCOME
+    ++        assert tesla_provider(api).stopCharging("5YJ3E1EA1KF000001") == REFUSED_OUTCOME
+    + 
+    +         assert listing.call_count == 1
+    +         assert posts.call_count == 0
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +     def test_required_car_logged_once_with_the_fix(self, owner_car, any_http, caplog):
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car("required")
+    +-        api.setChargeRate(10, vehicle)
+    +-        api.setChargeRate(12, vehicle)
+    +-        api.wakeVehicle(vehicle)
+    +-        owner_provider(api).startCharging(vehicle.VIN)
+    ++        provider = tesla_provider(api)
+    ++        provider.setAmps(vehicle.VIN, 10)
+    ++        provider.setAmps(vehicle.VIN, 12)
+    ++        provider.wake(vehicle.VIN)
+    ++        provider.startCharging(vehicle.VIN)
+    + 
+    +         lines = self.lines(caplog, "command_signing")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +     ):
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car(signing)
+    +-        api.setChargeRate(10, vehicle)
+    +-        api.setChargeRate(12, vehicle)
+    ++        provider = tesla_provider(api)
+    ++        provider.setAmps(vehicle.VIN, 10)
+    ++        provider.setAmps(vehicle.VIN, 12)
+    + 
+    +         lines = self.lines(caplog, "command_signing")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +         caplog.set_level(logging.INFO)
+    +         api, unsigned, signed = mixed_fleet
+    +         requests_mock.post(re.compile(r".*/command/set_charging_amps"), json=ACCEPTED)
+    +-        api.setChargeRate(10, signed)
+    +-        api.setChargeRate(10, unsigned)
+    +-        api.setChargeRate(12, signed)
+    ++        provider = tesla_provider(api)
+    ++        provider.setAmps(signed.VIN, 10)
+    ++        provider.setAmps(unsigned.VIN, 10)
+    ++        provider.setAmps(signed.VIN, 12)
+    + 
+    +         lines = self.lines(caplog, "command_signing")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +             status_code=403,
+    +             json=VCP_403,
+    +         )
+    +-        api.setChargeRate(10, vehicle)
+    +-        api.setChargeRate(12, vehicle)
+    +-        api.wakeVehicle(vehicle)
+    ++        provider = tesla_provider(api)
+    ++        provider.setAmps(vehicle.VIN, 10)
+    ++        provider.setAmps(vehicle.VIN, 12)
+    ++        provider.wake(vehicle.VIN)
+    + 
+    +         lines = self.lines(caplog, "Car")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +         assert "TeslaBLE" in lines[0]
+    + 
+    + 
+    +-class TestVehiclePriorityLogsWhy:
+    +-    """When every listed car is read-only, VehiclePriority skips TeslaAPI
+    +-    without calling it; the skip still logs the per-car reason once."""
+    ++class TestOrderLogsWhy:
+    ++    """When every listed car is read-only, the provider order leaves TeslaAPI
+    ++    out without calling it; the walk still logs the per-car reason once."""
+    + 
+    +-    @pytest.mark.parametrize("method", ["setChargeRate"])
+    +-    def test_one_line_naming_the_car(self, owner_car, any_http, caplog, method):
+    ++    def test_one_line_naming_the_car(self, owner_car, any_http, caplog):
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car("required")
+    +         assert api.readOnly is True
+    +-        ble = Mock()
+    +-        setattr(ble, method, Mock(return_value=True))
+    +-        calls = {
+    +-            "setChargeRate": lambda priority: priority.setChargeRate(10, vehicle),
+    +-        }
+    + 
+    +         for _ in range(5):
+    +-            api.carApiLastStartOrStopChargeTime = 0
+    +-            assert calls[method](priority_over(api, ble)) is True
+    ++            assert amps_candidates(api, vehicle) == ["Fallback"]
+    + 
+    +         lines = [
+    +             r.getMessage()
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePriorityLogsWhy:
+    +         assert "teslaProxy" in lines[0]
+    +         assert "TeslaBLE" in lines[0]
+    +         assert any_http.call_count == 0
+    +-        assert getattr(ble, method).call_count == 5
+    +         assert no_error_recorded(api)
+     
+      ## tests/unit/test_teslaapi_refresh.py ##
+     @@ tests/unit/test_teslaapi_refresh.py: class TestFleetRefreshUnchanged:
+    @@ tests/unit/test_vehicle_command_queue.py (deleted)
+     -        wait_idle(q)
+     -        q.put({"cmd": "setChargeRate", "amps": 16, "vehicle": None})
+     -        wait_idle(q)
+    --        assert module.calls == [("setAmps", 80, None), ("setChargeRate", 16, None)]
+    +-        assert module.calls == [
+    +-            ("setAmps", 80, None),
+    +-            ("setChargeRate", 16, None),
+    +-        ]
+     -
+     -    def test_no_module_gives_false_and_worker_survives(self, module):
+     -        available = []
+    @@ tests/unit/test_vehicle_command_queue.py (deleted)
+     -
+     -    # The worker re-raises SystemExit, which pytest reports as an unhandled
+     -    # thread exception; that is the behaviour under test, not a failure.
+    --    @pytest.mark.filterwarnings(
+    --        "ignore::pytest.PytestUnhandledThreadExceptionWarning"
+    --    )
+    +-    @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+     -    def test_base_exception_in_dispatch_clears_busy(self, q, module):
+     -        raised = threading.Event()
+     -
+ 8:  f2b3cc03 !  8:  bbf0b0bd Carry main's remaining command behaviours onto the reconciler
+    @@ lib/TWCManager/TWCSlave.py: class TWCSlave:
+              if plugged:
+                  return plugged
+     
+    - ## lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py ##
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Provider):
+    -         # The broadcast gate: an Owner-only install never sends a
+    -         # vehicle-less command here, as today's read-only refusal skips it
+    -         if capability in COMMANDS:
+    --            return self.carapi.fleetSlot.usable("command")
+    -+            usable = self.carapi.fleetSlot.usable("command")
+    -+            if not usable:
+    -+                self.carapi.noteReadOnly()
+    -+            return usable
+    -         if capability == READ_WALL_CONNECTOR_VINS:
+    -             return self.carapi.wallConnectorVinsReady(self.carapi.fleetSlot)
+    -         return self.carapi.fleetSlot.usable("read")
+    -
+      ## lib/TWCManager/Vehicle/Reconcile/Targets.py ##
+     @@ lib/TWCManager/Vehicle/Reconcile/Targets.py: def presentVehicles(master, capability) -> List:
+      
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          refreshClientID = ""
+          # FleetAPI OAuth (authorization code) login. Two variants, auto-selected by
+          # whether a client secret is configured:
+    -@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -             return ("fleet", "NA")
+    -         return ("unknown", None)
+    - 
+    -+    def noteReadOnly(self):
+    -+        # The INFO hint, once per Fleet slot change: no HTTP call, no API
+    -+        # error (an error would start the backoff that also blocks reads)
+    -+        if not self.readOnly or self.fleetSlot.changes == self.refusalLoggedAt:
+    -+            return
+    -+        self.refusalLoggedAt = self.fleetSlot.changes
+    -+        logger.info(
+    -+            "Tesla API is read-only (no usable Fleet API token); not sending "
+    -+            "vehicle commands. Commands need a Fleet API token or the "
+    -+            "TeslaBLE module."
+    -+        )
+    -+
+    -     def applySyncedToken(self, accessToken):
+    -         # Entry point for token sync sources (TeslaMate): the access token
+    -         # only, so a synced slot never refreshes. Accepted whether or not
+     
+      ## lib/TWCManager/VehicleCommandQueue.py ##
+     @@ lib/TWCManager/VehicleCommandQueue.py: from TWCManager.Logging.LoggerFactory import LoggerFactory
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+     +    def make(self, settings=None, ha=None):
+              from tests.unit.test_carapivehicle_registry import api_with_registry
+              from TWCManager.TWCMaster import TWCMaster
+    -         from TWCManager.Vehicle.Providers import Capability as C
+    +         from TWCManager.Vehicle.Providers.Order import ProviderOrder
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachModuleOnce:
+              master.providerOrder = ProviderOrder(master)
+              for p in [BLE()] + api.providers():
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+              return ble, api
+      
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachModuleOnce:
+    -         ble, api = self.make({"commandPolicy": "api_only"})
+              assert api.updateChargeAtHome.call_count == 1
+              assert not ble.updateChargeAtHome.called
+    -+
+    + 
+     +    def test_home_assistant_refreshes_once_alongside_teslaapi(self, no_threads):
+    -+        # 12b deleted-test GAP: HA is refreshed even when TeslaAPI holds cars
+    ++        # HA is refreshed even when TeslaAPI holds cars
+     +        ha = Mock()
+     +        ha.enabled.return_value = True
+     +        ble, api = self.make(ha=ha)
+     +        assert ha.updateChargeAtHome.call_count == 1
+     +        assert api.updateChargeAtHome.call_count == 1
+    ++
+    + 
+    + # What Tesla answers a REST command for a car that needs signed commands.
+    + VCP_403 = {
+     
+      ## tests/unit/test_teslable_pairing_status.py ##
+     @@ tests/unit/test_teslable_pairing_status.py: def test_charge_state_maps_the_cars_own_current_request():   # slim Task 12b
+ 9:  782b910d =  9:  90fb1309 Send one classified TeslaBLE command with one quick retry
+10:  a34dba05 ! 10:  d45276b5 Read vehicle fields through the providers
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from typing import Dict,
+          FLEET_COMMAND,
+          FLEET_DATA,
+          FLEET_WAKE,
+    +     OWNER_COMMAND,
+     +    LOCATION_FIELDS,
+          READ_CHARGE,
+          READ_LIST,
+          READ_LOCATION,
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Provider import CLOUD_SUPPRESSED, Provider, vehicleMaxAmps
+    - WALL_CONNECTOR_VINS = Declaration(CLOUD_FREE)
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: TESLA_COMMAND = {
+      
+      
+    --class OwnerAPIProvider(Provider):
+    -+class _TeslaAPIProvider(Provider):
+    + class _TeslaAPIProvider(Provider):
+    +-    # One token slot of the TeslaAPI module. The command methods are shared:
+    +-    # TeslaAPI.command and wakeOutcome send through the slot that may
+    +-    # command the car (commandSlotFor), and ready() says which provider that
+    +-    # is, so each car's command goes out once
+    +-    local = False
+    +-    SUPPRESSED = CLOUD_SUPPRESSED
+     +    # One token slot of the TeslaAPI module
+     +    FIELDS = CHARGE_FIELDS | LOCATION_FIELDS
+     +    slotName = "ownerSlot"
+    -+
+    -+    def __init__(self, carapi):
+    -+        self.carapi = carapi
+    -+        self.module = carapi
+    -+
+    + 
+    +     def __init__(self, carapi):
+    +         self.carapi = carapi
+    +         self.module = carapi
+    + 
+     +    def fetch(self, vehicle, field: str, allowWake: bool = False) -> bool:
+     +        # Never wakes, whatever allowWake says: a cloud wake is never worth a
+     +        # read. update_vehicle_data observes as "TeslaAPI" for either slot
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Provider import CLO
+     +        # Free online check (vehicles/{vin}) before a paid vehicle_data
+     +        return bool(car.is_awake(slot=slot) and car.update_vehicle_data(slot=slot))
+     +
+    -+
+    -+class OwnerAPIProvider(_TeslaAPIProvider):
+    -     # Declares no commands: the inherited command methods answer UNSUPPORTED
+    +     def ampsRange(self, vehicle) -> Optional[Tuple[float, float]]:
+    +         if vehicle is None:
+    +             return None
+    +         return (1, vehicleMaxAmps(vehicle, self.carapi.master.config["config"]))
+    + 
+    +-    # Command methods: one request each (set_charging_amps below 5 A
+    ++    # Command methods, shared by both slots: TeslaAPI.command and
+    ++    # wakeOutcome send through the slot that may command the car
+    ++    # (commandSlotFor), and ready() says which provider that is, so each
+    ++    # car's command goes out once. One request each (set_charging_amps below 5 A
+    +     # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    +     # the lane wakes first when the attempt says so.
+    + 
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+    + 
+    + class OwnerAPIProvider(_TeslaAPIProvider):
+    +     # Commands only a car Tesla lists with command_signing "off": free, but
+    +-    # paced as Fleet (OWNER_COMMAND). The inherited command methods answer
+    +-    # UNSUPPORTED; the legacy module sends through commandSlotFor
+    ++    # paced as Fleet (OWNER_COMMAND)
+          name = "OwnerAPI"
+          rank = 4
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Provider):
+    ++    local = False
+    +     DECLARATIONS = {
+    +         READ_LIST: Declaration(CLOUD_FREE),
+    +         READ_ONLINE: Declaration(CLOUD_FREE),
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(_TeslaAPIProvider):
+    +         WAKE: Declaration(OWNER_COMMAND),
+    +         READ_WALL_CONNECTOR_VINS: WALL_CONNECTOR_VINS,
+          }
+    -     SUPPRESSED = CLOUD_SUPPRESSED
+    ++    SUPPRESSED = CLOUD_SUPPRESSED
+      
+    --    def __init__(self, carapi):
+    --        self.carapi = carapi
+    --        self.module = carapi
+    --
+          def ready(self, vehicle, capability) -> bool:
+              if capability == READ_WALL_CONNECTOR_VINS:
+    -             # A site read: no vehicle needed
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Provider):
+    -         return self.carapi.wallConnectorVins(self.carapi.ownerSlot)
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(_TeslaAPIProvider):
+      
+    - 
+    --class FleetAPIProvider(Provider):
+    -+class FleetAPIProvider(_TeslaAPIProvider):
+    + class FleetAPIProvider(_TeslaAPIProvider):
+          name = "FleetAPI"
+     +    slotName = "fleetSlot"
+          rank = 5
+    -     local = False
+    ++    local = False
+          DECLARATIONS = {
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Provider):
+    +         READ_LIST: Declaration(CLOUD_FREE),
+    +         READ_ONLINE: Declaration(CLOUD_FREE),
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+    +         WAKE: Declaration(FLEET_WAKE),
+    +         READ_WALL_CONNECTOR_VINS: WALL_CONNECTOR_VINS,
+          }
+    -     SUPPRESSED = CLOUD_SUPPRESSED
+    ++    SUPPRESSED = CLOUD_SUPPRESSED
+      
+    --    def __init__(self, carapi):
+    --        self.carapi = carapi
+    --        self.module = carapi
+    --
+          def ready(self, vehicle, capability) -> bool:
+              if capability == READ_WALL_CONNECTOR_VINS:
+    -             # The read-slot rule: Fleet only when the Owner slot cannot
+     
+      ## lib/TWCManager/Vehicle/Providers/TeslaBLEProvider.py ##
+     @@ lib/TWCManager/Vehicle/Providers/TeslaBLEProvider.py: from typing import Optional, Tuple
+    @@ tests/unit/reconcile_helpers.py: def make_order(settings=None, *providers):
+          return m, o
+     
+      ## tests/unit/teslatokens.py ##
+    -@@ tests/unit/teslatokens.py: def add_home_vehicle(api):
+    +@@ tests/unit/teslatokens.py: def add_home_vehicle(
+          vehicle.atHome = True
+          vehicle.lastAPIAccessTime = time.time()
+          return vehicle
+    @@ tests/unit/test_teslaapi_providers.py: def test_fleet_reads_only_when_owner_cann
+      
+      
+     @@ tests/unit/test_teslaapi_providers.py: def test_fleet_commands_resolve_the_car_by_vin():
+    -     assert owner.setAmps(VIN, 10).kind == O.UNSUPPORTED    # Owner declares no commands
+    +     assert owner.setAmps(VIN, 10) == O.Outcome(O.DONE)    # the Owner provider shares the command path
+      
+      
+     -def test_read_source_passes_its_slot_to_the_car():
+11:  6466b704 ! 11:  c5b2577b Send every TeslaAPI request through one helper and status classifier
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +                logging.INFO8,
+     +                "Car API %s %s: HTTP %s" % (method, path, req.status_code),
+     +            )
+    ++            if (
+    ++                purpose in ("command", "wake")
+    ++                and slot is self.ownerSlot
+    ++                and vehicle is not None
+    ++                and self.noteOwnerCommandRefused(vehicle, req)
+    ++            ):
+    ++                # Tesla refused the Owner API for this car (logged, latched):
+    ++                # no error backoff, so the next provider sends at once
+    ++                return req, Outcome(REFUSED, "owner refused")
+     +            outcome = self._classify(
+     +                slot, req.status_code, purpose, req.text, vehicle, tries > 0
+     +            )
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -            except requests.exceptions.RequestException as e:
+     -                return Outcome(ERROR, type(e).__name__), None
+     -            code = req.status_code
+    +-            if slot is self.ownerSlot and self.noteOwnerCommandRefused(vehicle, req):
+    +-                # Tesla refused the Owner API for this car (logged, latched):
+    +-                # no error backoff, so the next provider sends at once
+    +-                return Outcome(REFUSED, "owner refused"), None
+     -            if code == 401:
+     -                if (
+     -                    not refreshed
+12:  08948cf0 ! 12:  55afc0c5 Locate cars from their latest free position for presence
+    @@ tests/unit/reconcile_helpers.py: from TWCManager.VehicleCommandQueue import Vehi
+      
+     +# Presence from position, as live: home is set and TeslaMate's free
+     +# position lands in the registry; nothing sets atHome by hand
+    -+HOME, AWAY = (<lat>, <lon>), (40.0, -86.0)
+    ++HOME, AWAY = (40.0, -75.0), (40.922592, -76.606221)
+     +
+     +
+     +def placeAt(master, vehicle, at=HOME):
+    @@ tests/unit/test_limit_wiring.py: def test_a_failed_boot_list_load_recovers_witho
+     +    m, r, v, c = setup(ble(O.Outcome(O.DONE))); m.settings.update(commandPolicy="ble_only", homeLat=HOME[0], homeLon=HOME[1])
+     +    api = new_api(master=m); api.storeToken(owner_token()); api.storeToken(fleet_token()); del m.modules["TeslaAPI"]   # not a module record
+     +    for p in api.providers(): m.providerOrder.register(p)
+    -+    api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    ++    api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+     +    if claim: v.claim("TeslaBLE", True, "paired")
+     +    if held: m.heldLimits.set(VIN, 100, 50)
+     +    if position: placeAt(m, v, position)
+13:  e05696ab ! 13:  0fde0bd2 Remove code the new command path orphaned or that was already dead
+    @@ lib/TWCManager/Vehicle/Providers/TelemetryProvider.py (deleted)
+     
+      ## lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py ##
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Capability import (
+    -     FLEET_WAKE,
+    +     OWNER_COMMAND,
+          LOCATION_FIELDS,
+          READ_CHARGE,
+     -    READ_LIST,
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Capability import (
+          READ_WALL_CONNECTOR_VINS,
+          SET_AMPS,
+          SET_CHARGE_LIMIT,
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+    +     # (commandSlotFor), and ready() says which provider that is, so each
+    +     # car's command goes out once. One request each (set_charging_amps below 5 A
+    +     # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    +-    # the lane wakes first when the attempt says so.
+    ++    # the attempt runner wakes first when the attempt says so.
+    + 
+    +     # The clock passed to the wake hold; a test may replace it
+    +     clock = time.time
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(_TeslaAPIProvider):
+          rank = 4
+          local = False
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(_T
+     -        READ_ONLINE: Declaration(CLOUD_FREE),
+              READ_CHARGE: Declaration(CLOUD_FREE),
+     -        READ_LOCATION: Declaration(CLOUD_FREE),
+    -         READ_WALL_CONNECTOR_VINS: WALL_CONNECTOR_VINS,
+    -     }
+    -     SUPPRESSED = CLOUD_SUPPRESSED
+    +         SET_CHARGE_LIMIT: Declaration(OWNER_COMMAND),
+    +         START_CHARGING: Declaration(OWNER_COMMAND),
+    +         STOP_CHARGING: Declaration(OWNER_COMMAND),
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+          rank = 5
+          local = False
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_T
+              SET_CHARGE_LIMIT: Declaration(FLEET_COMMAND),
+              START_CHARGING: Declaration(FLEET_COMMAND),
+              STOP_CHARGING: Declaration(FLEET_COMMAND),
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+    - 
+    -     # Command methods: one billed request each (set_charging_amps below 5 A
+    -     # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    --    # the lane wakes first when the attempt says so.
+    -+    # the attempt runner wakes first when the attempt says so.
+    - 
+    -     # The clock passed to the wake hold; a test may replace it
+    -     clock = time.time
+     
+      ## lib/TWCManager/Vehicle/Providers/TeslaBLEProvider.py ##
+     @@ lib/TWCManager/Vehicle/Providers/TeslaBLEProvider.py: from .Capability import (
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          def wallConnectorVinsReady(self, slot) -> bool:
+              # Cache reads only, no I/O (a provider's ready() asks this). The
+              # scope is checked first: usable() would log a missing one, and this
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         # "only available on fleetapi" (the Owner API no longer takes
+    +         # commands). Stops Owner API commands to it until TWCManager
+    +         # restarts, and logs that once. Records no API error, which would
+    +-        # also back off reads; the caller returns its failure, so
+    +-        # VehiclePriority tries the next module.
+    ++        # also back off reads; the caller returns its failure, so the next
+    ++        # provider is tried.
+    +         if req is None:
+    +             return False
+    +         text = str(getattr(req, "text", "") or "")
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+                  return obs.source
+              return "TeslaAPI"
+    @@ tests/unit/test_provider_tables.py: def test_tables_match_the_declarations_they_
+     +    assert byName["Gen3TWC"].declarations() == {c: D(C.LOCAL) for c in (C.SET_AMPS, C.START_CHARGING, C.STOP_CHARGING)}
+     +    assert byName["TeslaBLE"].declarations() == {c: D(C.LOCAL) for c in (C.READ_CHARGE, C.SET_CHARGE_LIMIT, C.START_CHARGING, C.STOP_CHARGING, C.SET_AMPS, C.WAKE)}
+          wcv = D(C.CLOUD_FREE)
+    --    assert byName["OwnerAPI"].declarations() == dict({c: D(C.CLOUD_FREE) for c in (C.READ_LIST, C.READ_ONLINE, C.READ_CHARGE, C.READ_LOCATION)}, **{C.READ_WALL_CONNECTOR_VINS: wcv})
+    +-    assert byName["OwnerAPI"].declarations() == dict({c: D(C.CLOUD_FREE) for c in (C.READ_LIST, C.READ_ONLINE, C.READ_CHARGE, C.READ_LOCATION)}, **{c: D(C.OWNER_COMMAND) for c in C.COMMANDS}, **{C.READ_WALL_CONNECTOR_VINS: wcv})
+     -    assert byName["FleetAPI"].declarations() == {C.READ_LIST: D(C.CLOUD_FREE), C.READ_ONLINE: D(C.CLOUD_FREE), C.READ_CHARGE: D(C.FLEET_DATA), C.READ_LOCATION: D(C.FLEET_DATA),
+    -+    assert byName["OwnerAPI"].declarations() == {C.READ_CHARGE: D(C.CLOUD_FREE), C.READ_WALL_CONNECTOR_VINS: wcv}
+    ++    assert byName["OwnerAPI"].declarations() == dict({C.READ_CHARGE: D(C.CLOUD_FREE), C.READ_WALL_CONNECTOR_VINS: wcv}, **{c: D(C.OWNER_COMMAND) for c in C.COMMANDS})
+     +    assert byName["FleetAPI"].declarations() == {C.READ_CHARGE: D(C.FLEET_DATA),
+              C.SET_CHARGE_LIMIT: D(C.FLEET_COMMAND), C.START_CHARGING: D(C.FLEET_COMMAND), C.STOP_CHARGING: D(C.FLEET_COMMAND), C.SET_AMPS: D(C.FLEET_COMMAND),
+              C.WAKE: D(C.FLEET_WAKE), C.READ_WALL_CONNECTOR_VINS: wcv}
+    @@ tests/unit/test_teslaapi_providers.py
+     @@ tests/unit/test_teslaapi_providers.py: def test_two_providers_with_honest_costs():
+              False,
+          )
+    -     assert owner.cost(C.READ_CHARGE) == C.CLOUD_FREE and owner.cost(C.SET_AMPS) is None
+    +     assert owner.cost(C.READ_CHARGE) == C.CLOUD_FREE and owner.cost(C.SET_AMPS) == C.OWNER_COMMAND
+     -    assert (
+     -        fleet.cost(C.READ_ONLINE) == C.CLOUD_FREE
+     -        and fleet.cost(C.READ_CHARGE) == C.FLEET_DATA
+14:  7c0f7576 ! 14:  42837886 Document the reconciler, paid fallback and presence
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+     +    * (@MikeBishop) - Storm Watch's Tesla API requests time out after 10 seconds, and their errors log only the exception type, never its text
+          * (@MikeBishop) - When TWCManager shares power with Tesla API cars, the distributor gives an idle TWC a target of 0 and counts nothing against the budget. On the wire the TWC is offered 0 when no car is charging (a Gen2 treats 0 as its hardware minimum), and its hardware minimum (usually 6 A) when another car is charging and there is at least minAmpsPerTWC of power per car, so it still sees a car plug in. Brief overshoot is fine: the configured limit is already the 80% continuous rating and the next cycle rebalances
+          * (@MikeBishop) - A targeted start, stop or charge limit sent through Home Assistant now affects only the named car; a command for every car still reaches every Home Assistant car
+    --    * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+          * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+          * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+          * Fix: Correct invalid logging level in update_vehicle_data error handler which crashed when logging a failed API response
+15:  d94d7f86 = 15:  41e98327 Pin old-vs-new command behaviour per install type and fix what it found
+16:  c970a915 ! 16:  d4e28834 Remove dead and test-only helpers
+    @@ lib/TWCManager/Vehicle/Telemetry.py: class TelmetryBase:
+     -        return True
+     
+      ## lib/TWCManager/Vehicle/TeslaAPI.py ##
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         # telemetry) lists them. Commands still check each car.
+    +         if self.fleetSlot.usable("command"):
+    +             return False
+    +-        vehicles = self.getCarApiVehicles()
+    ++        vehicles = self.carApiVehicles
+    +         if not vehicles:
+    +             return not self.ownerTokenHeld()
+    +         return not any(self.ownerCommandsAllowed(v) for v in vehicles)
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              # usable for reads. Safe to call from any thread; concurrent callers
+              # will not double-add vehicles.
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          def resetCarApiLastErrorTime(self, vehicle=None):
+              self.carApiLastErrorTime = 0
+              if vehicle:
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         if not self.readOnly:
+    +             return False
+    +         if self.ownerTokenHeld():
+    +-            for vehicle in self.getCarApiVehicles():
+    ++            for vehicle in self.carApiVehicles:
+    +                 self.refuseCommandFor(vehicle, command)
+    +         elif self.fleetSlot.changes != self.refusalLoggedAt:
+    +             logger.info(
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                          car.statusDeferral = 0
+                          updated = car.update_location(0)
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+          # Whether lastVehicleAwakeState came from an answer (a sync source or
+     
+      ## tests/unit/teslatokens.py ##
+    -@@ tests/unit/teslatokens.py: def add_home_vehicle(api):
+    -     """Add vehicle 5YJ3E1EA1KF000001, at home and recently contacted, so ready() is True
+    -     without an HTTP call. Use with the no_threads fixture."""
+    -     api.addVehicle({"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"})
+    +@@ tests/unit/teslatokens.py: def add_home_vehicle(
+    +     if command_signing is not None:
+    +         entry["command_signing"] = command_signing
+    +     api.addVehicle(entry)
+     -    vehicle = api.getCarApiVehicles()[-1]
+     +    vehicle = api.carApiVehicles[-1]
+          vehicle.atHome = True
+    @@ tests/unit/teslatokens.py: def add_home_vehicle(api):
+     
+      ## tests/unit/test_carapivehicle_registry.py ##
+     @@ tests/unit/test_carapivehicle_registry.py: def test_vehicle_joins_registry_and_claims_teslaapi():
+    -     api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    +     api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+          v = reg.get(VIN)
+          assert (
+    --        v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "<car>"
+    -+        v.attachment("TeslaAPI") is api.carApiVehicles[0] and v.name == "<car>"
+    +-        v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "TestCar"
+    ++        v.attachment("TeslaAPI") is api.carApiVehicles[0] and v.name == "TestCar"
+          )
+          api.fleetSlot.clear()
+          assert v.tier == "observed"  # no command slot: read-only
+    @@ tests/unit/test_carapivehicle_registry.py: def test_writes_after_forget_and_reli
+     @@ tests/unit/test_carapivehicle_registry.py: def test_telemetry_feed_drives_a_real_car():
+      
+          api, reg = api_with_registry()
+    -     api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    +     api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+     -    car = api.getCarApiVehicles()[0]
+     +    car = api.carApiVehicles[0]
+          master = api.master
+17:  bbca17a3 = 17:  5a5ee2a9 Log the Home Assistant host and exception types, not URLs or text
+18:  c101a5cc = 18:  b77ab8e9 Check again after a cloud wake the car did not answer
+19:  4998127b ! 19:  86ee4d2c Keep held limits in chargeLimits, keyed by VIN; never set an unknown limit
+    @@ Commit message
+      ## CHANGELOG.md ##
+     @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+      * Architecture
+    -     * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used read-only
+    +     * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used for reads, and for commands only to vehicles Tesla reports with `command_signing: off`
+          * (@MikeBishop) - Saved Tesla tokens migrate to separate Owner and Fleet settings on first start; downgrading afterwards loses the Owner API token (#692)
+     -    * (@MikeBishop) - Held charge limits (the limit a car had before TWCManager changed it) migrate from settings `chargeLimits` to `heldLimits`, keyed by VIN, on first start; downgrading afterwards loses them, and upgrading again after a downgrade uses the held limits saved before the downgrade (the older release's `chargeLimits` is kept but ignored, with a warning)
+     +    * (@MikeBishop) - Held charge limits in settings `chargeLimits` are keyed by VIN; entries keyed by the Tesla API's numeric vehicle ID are re-keyed when the vehicle list names them. After a downgrade, only 1.3.x's TeslaBLE path reads the VIN-keyed entries; its Tesla API path, keyed by numeric ID, starts over

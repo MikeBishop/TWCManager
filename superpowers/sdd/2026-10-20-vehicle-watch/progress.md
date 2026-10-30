@@ -1,0 +1,300 @@
+# SDD ledger — plan: .superpowers/plans/2026-10-20-vehicle-watch.md
+
+Spec: .superpowers/specs/2026-10-20-vehicle-watch-design.md (approved 2026-10-20). User 2026-10-20: "Once that lands [stack CI], pick up the spec and plan and start working on that."
+
+## Pre-flight scan
+
+| Pair / task | Shared | Produces → consumes | Finding |
+|---|---|---|---|
+| Base | — | plan says phase5 @ 06d404bd | 06d404bd no longer exists after the stack squash; Phase 5 now ends 52a2652c (adds FT typed/min-delta commit and the FT config check, which touches TeslaAPI.py and TWCManager.refreshTokens). |
+| T1↔T4/T5/T6 | TeslaBLE.ping(vin, scan) | T1 produces, T4–T6 call | consistent |
+| T1↔T8 | Presence.checkPlug / pick ping | T1 rewires gate; T8 folds pre-command ping | consistent (different call sites) |
+| T2↔T5 | VehicleEndpoint.wantsToCharge, isReadOnly | T2 sleep-aware; T5 tests use it | consistent |
+| T3↔T5 | WatchBudget.spend(price, cls), master.watchBudget | T3 produces; T5 consumes | consistent |
+| T4↔T5–T9 | Watch.py, test_watch.py, reconcile_helpers helpers | T4 adds helpers (bleAnswers/bleReads/bleScans/liveFeed/gen2Slave/attachFleet/attachOwner) | bleReads/bleScans named in T4 but first used T5/T6 — fine |
+| T4↔T9 | Watch.settings(), enabled | T4 parses config; T9 wires tick + "disabled" | consistent |
+| T5↔T8 | readNow; TWCMaster.updateChargeAtHome | T8 routes power start to readNow | consistent |
+| T6↔T8 | is_far_from_home | T6 uses; T8 keeps | consistent |
+| T7↔T9 | check_green_energy → watch.loadSample | T7 guarded getattr | consistent |
+| T8↔parity | test_command_path_parity counts | must not move | stop rule kept |
+| T10 step 4 | FT doc minimum_delta paragraph | already present on Phase 5 (deltas on all numeric fields) | conflict with current tree |
+| each task self-consistency | tests vs code | T3 uses make_master, T9 guesses fixture names (`client`), T4 helpers guessed | implementer verifies names and adapts plumbing only |
+
+## Rulings
+- Ruling: base Phase 6 on vehicle-model/phase5 at 52a2652c (the squashed tip), BASE suite = whatever that tip passes (2232 at last run of the equivalent tree); line numbers in the plan are approximate — implementers locate by name. — the plan's base was rewritten by the user-approved squash; trees match plus two later tasks. — cost if wrong: none beyond line-number drift.
+- Ruling: T10 step 4 reduces to the watch sentence (the watch covers a car while its feed is down) plus the Fleet Telemetry price; the minimum_delta recommendation already exists — don't duplicate. — cost if wrong: one doc paragraph.
+- Ruling: plan-named test helpers/fixtures that don't exist are adapted to the nearest existing ones (plumbing only; assertions kept). — cost if wrong: test rework.
+- Setup: worktree scratchpad/wt-vm6, branch vehicle-model/phase6 from 52a2652c. BASE full suite (tests minus API/integration) = 2241 passed, 1 xfailed. lib = 26413 lines.
+- Task 1: dispatched (opus) BASE 52a2652c.
+- Task 1: implemented 4e23c85c (DONE_WITH_CONCERNS: door unplug derives prior plug from marks; unclaimed cars pinged with scan=True in pick/checkPlug). lib +42. Suite 2247+1xf. Review dispatched (opus).
+- Task 1 review: spec PASS, quality APPROVE w/ 1 Important (unclaimed cars must ping scan=False: BLE time + one-miss absence). Ruling: door prior-plug-from-marks deviation accepted (reviewer: safe). Fix round 1 sent (findings 1-4, 6 opt, 5 trim).
+- Task 1: complete at 3af56479 (fix round 1 re-review all addressed; plus exc_info on _plugSession's broad catch so a ping bug shows a traceback). Suite 2248+1xf. lib +47.
+- Task 2: dispatched (sonnet) BASE 3af56479.
+- Task 2: implemented 356c1d15 (sonnet; isCharging/currentAmps added as new props — base lacks them). lib +15, suite 2251+1xf. Review dispatched (sonnet) incl. whether the distributor reads those props at all.
+- Task 2 review: PASS; isCharging/currentAmps have no reader. Ruling: drop them (dead; distributor enforces via wantsToCharge; EMS step uses situation==HOME_CHARGING which excludes asleep) — cost if wrong: re-add 8 lines when a reader appears. Add None/Complete + distributor-level tests. Fix round 1 sent.
+- Task 2: complete at 1826aeb3 (fix round 1 verified by controller diff read; inlined single-use _asleep). lib +4 (26464). Suite 2253+1xf.
+- Task 3: dispatched (sonnet) BASE 1826aeb3.
+- Task 3: implemented 1388b3e0 (WatchBudget +62, TWCMaster +7). Suite 2257+1xf. Review dispatched (sonnet).
+- Task 3 review: PASS / fixes. Ruling: log flag tracks EVENT-payability only (no flapping on routine floor refusals); add leaf lock; clamp future stamp; one-line logs; keep 1e-9 epsilon (fractional refill rate makes it needed). Fix round 1 sent.
+- Task 3: complete at 63fea432 (fix round verified by controller read of WatchBudget). lib 26540 (+76 phase so far... Task3 +76? no: +76 vs 26464 = Task3 +76). Suite 2259+1xf.
+- Task 4: dispatched (opus) BASE 63fea432.
+- Task 4: implemented 3c02f7c4 (DONE_WITH_CONCERNS: completion via Job.done callback from Reconciler.report; stale onlineState cache after feed drop; no pruning). lib +194 (Watch.py 190) — over plan pace. Review dispatched (opus).
+- Task 4 review: PASS / APPROVE w/ changes. Fix round 1 sent: Q1 via S2 (derive due from lastAt+cadence), T1 in-flight test, S1,S3–S6 (~-30), N1, T2; onlineState echo fixed now (+1, require live feed) rather than Task 8. Ruling (N3): 'resume at once' = at the next due ring (≤ one cadence); Task 10 docs must say so. — cost if wrong: up to 30 min unwatched after a feed drop for an asleep away car.
+- Task 4: complete at 1a1c0586 (re-review all addressed). lib 26717 (+177 this task), Watch.py 171. Suite 2269+1xf.
+- Task 5: dispatched (opus) BASE 1a1c0586.
+- Task 5: implemented 4d7d1ef2 (DONE_WITH_CONCERNS). lib +100, Watch.py 271. Suite 2281+1xf.
+- Ruling: watch reads must NOT zero car.statusDeferral — spec: the deferral is the two-caller dedupe and forced reads honour it (Task 8 test pays once inside 300 s); fix the test's time instead. — cost if wrong: a readNow inside 300 s of a paid read answers from stored values.
+- Ruling: first sight after a restart is not an arrival (seed the memo, no read) — a restart would otherwise buy one paid read per Fleet car. — cost if wrong: a car whose battery changed while TWCManager was down shows the persisted level until its next transition.
+- Ruling: status()["last"] stays the Ring 1 answer; Task 9 shows read time separately if needed.
+- Task 5 review: PASS after rulings / APPROVE w/ changes. Ruling refined (R2): seed the memo only on the first pass after start; a car first seen mid-run still gets its arrival read (spec). Fix round 1 sent (1–9, 13; skip 10). Note: Watch.py heading to ~240 before Tasks 6–7 vs plan ~220 total — Tasks 6–7 briefs must stress folding into existing paths.
+- Task 5: complete at 46adfe70 (re-review all addressed). lib 26801 (+84), Watch.py 255. Suite 2287+1xf. Parked: a cloud read answered from the deferral still spends a budget token (conservative: under-spends the month, never over) — accepted.
+- Task 6: dispatched (opus) BASE 46adfe70.
+- Task 6: implemented dba72feb (DONE_WITH_CONCERNS). lib +39, Watch.py 294. Suite 2290+1xf. Scan runs inside the status job after two consecutive misses while awake (no separate kind).
+- Ruling: a location read that finds the car driving schedules the next one by the spec's rule — not before the return time from that new fix (is_far_from_home → 1800/3600 s) — not every awayAwakeSecs; the plan's 5-min re-read would drain event tokens on a long drive. — cost if wrong: a car driving home is noticed up to 30 min later by cloud (BLE scan still catches arrival).
+- Task 6 review: spec FAIL (driving ruling not applied; failed location read counted as answered) / changes requested.
+- Ruling (finding 3, per spec line 80): once BLE has lost an away car (bleReach False from the two-miss scan), its status check moves to the cloud if it has a TeslaAPI attachment; with no cloud, no pings at all — only an arrival scan job (own kind "scan", coalescing with TeslaBLE's) every scanAwaySecs while it is not known asleep. Status cadence away-awake = awayAwakeSecs (300), not scanAwaySecs. — cost if wrong: ~6 lines; BLE-only installs see an away car's sleep state only via scan hits.
+- Ruling (finding 6): after a restart, an away car with no fix waits the return time from the start of the run (no immediate paid read), consistent with R2. — cost if wrong: one late location read after restart.
+- Ruling: accept findings 7, 8 (cache shutil.which once if it's free to do). After Task 6, run a trim pass over Watch.py (status(), _visit lock block, DEFAULTS) before Task 7.
+- Task 6 fix round 1: bbaf8105 (lib +44, Watch.py 299; suite 2296+1xf). Lost car = away + bleReach False: no pings; cloud status if attached; arrival scan kind 'scan' every scanAwaySecs regardless of cloud. Open to user: BLE scan is radio-wide — share one scan across all VINs; cadence 2.5 min vs back-off (asked 2026-10-20).
+- Ruling (user 2026-10-20, "Make the scan back off"): a lost car's arrival scan runs every scanAwaySecs (150) only within 1800 s of the last sign the car was awake (latest awake state/drive/departure evidence); after that it scans at awayAsleepSecs (1800), the asleep row. Plus (user agreed scan is radio-wide): one bluetoothctl scan answers every VIN due a scan; cars not asking get only hits recorded (a sighting), never a miss.
+- Ruling (user 2026-10-20 clarification): back-off is BLE-only. Lost car with cloud status: asleep → no scans; awake → no scans before fix time + return time (1800/3600 by distance), then every scanAwaySecs while awake. Sent to Task 6 round 2.
+- Task 6 fix round 2: 590db9aa (lib +65 total, Watch.py 311; suite 2300+1xf). Shared radio scan job (key 'radio'); watch settles a scan ask on request. Re-review (opus) of rounds 1+2.
+- Ruling (user 2026-10-20): Owner API is a free cloud source for the away location read (allowed even when a scan is possible; Fleet's paid read keeps the no-scan rule). Return time scales with distance: earliest return = fix time + straight-line distance / assumed speed (proposed 120 km/h, `watch` setting), floor 300 s; until then no status/scan/read for that car from any source. Replaces is_far_from_home's 1800/3600. To fold into the trim pass after the Task 6 re-review. Speed default pending user.
+- Ruling (user): assumed speed 120 km/h (75 mph) confirmed — 'not going in a straight line'.
+- Task 6: complete at 590db9aa (re-review: all addressed; 11/12 mutations caught). Parked/accepted: attribution scans stay synchronous inside ping (need inline answer; they now record hits for all cars); a cloud car kept awake away (Sentry) with no fresh fix scans every 150 s — mitigated by Task 6b's Owner location read and distance rule.
+- Task 6b (controller-added: distance return time, Owner location read, no-scan lost rule, status() for lost path, trim to Watch.py ≤ 270): brief task-6b-brief.md; dispatched (opus) BASE 590db9aa.
+- Task 6b: implemented 9d6d5084 (lib +3, Watch.py 314; suite 2306+1xf). Ruling: Watch.py ≤270 target re-baselined — trims saved ~25 but features cost ~28; further cuts would drop behaviour; spec allows feature growth (minimised); Task 8's deletions offset. Ruling: a lost car with no scan and no cloud gets a back-off ping (same schedule as the no-cloud scan) rather than silence. Accepted: PRESUMED gated by return time (300 s floor after restart); location read one cadence after return time when sleep unknown; status()['via'] shown by Task 9 only when watched.
+- Task 6b: fd210aa8 (back-off ping for a lost car nothing else can hear; lib +7, Watch.py 318; suite 2307+1xf). Review dispatched (opus).
+- Task 6b review: PASS / APPROVE minor. Fix round 1 sent (1–6 + size cuts). Notes for later tasks: readNow on an away car waits for the return time (Tasks 7/9).
+- Task 6b fix round 1: af892728 (lib +6, Watch.py 317; suite 2312+1xf). Behaviour change: HA-only lost car counts as having a cloud (scans only while known awake). Re-review (sonnet).
+- Task 6b re-review: regression — HA-only lost car never scanned (HA reports no state). Ruling: only a source that reports asleep/awake (TeslaAPI) counts as cloud for the back-off; HA-only follows no-cloud back-off. Fix round 2 sent.
+- Task 6b: complete at e450d355 (round 2 verified by report + failing-before test). lib 26871 (+5), Watch.py 316. Suite 2312+1xf.
+- Task 7: dispatched (opus) BASE e450d355.
+- Docker scan verified 2026-10-20 on magicmirror2 (user OK'd Docker install + reboot): unprivileged ubuntu:24.04+bluez container with only /run/dbus mount + DBUS env scans via host bluetoothd (24 vs host 26 lines). Host adapter was rfkill soft-blocked after boot (unblocked by hand). Test image removed; Docker left installed. Task 6c brief written (Docker scans + readiness reason + warning); dispatch after Task 7.
+- Task 7: implemented e3427248 (lib +79 vs ≤40 target; Watch.py 390; suite 2318+1xf). Concerns: per-car-per-direction debounce; hook inert until Task 9; TWCMaster.consumptionValues shared across instances (class attr). Review dispatched (opus) with size focus.
+- Task 7 review: PASS w/ gaps / changes (size). Rulings: C accepted (one configured voltage for the known-draw sum, as green-energy maths already does); G accepted — a step up reads every candidate at once (as step down does) instead of the chain — cost: at most one extra event read per additional awake, not-charging home car per step, debounced 5 min; 2 (inert without a consumption value), 3 (non-HOME candidates gated by _backAt), 4, 5 (instance dicts in TWCMaster.__init__) required; 7, 8 accepted as is. Fix round 1 sent.
+- Task 7 fix round 1: ef261dda (lib +61, Watch.py 371; suite 2319+1xf). Re-review (sonnet).
+- Task 7: complete at d94a92ba (re-review PASS; dropped LoadStep.sample's unused now). lib 26932. Suite 2319+1xf.
+- Task 6c: dispatched (opus) BASE d94a92ba.
+- Task 6c: implemented baa5ac78 (lib +31; suite 2328+1xf). Also fixed: nsenter prefix passed as one argv element (tesla-control could never run in Docker?) and Docker timeout killing TWCManager's own process group (no setsid). Review dispatched (opus) — verify both against main.
+- Task 6c review: PASS / APPROVE w/ fixes. Both extra fixes confirmed (main has the same nsenter-as-one-argv and Docker no-setsid+killpg bugs). Fix round 1 sent: I1 startup gap, I2 lost first check, M1 timeout re-check. M2 (live Docker smoke test of pairing/command/forced timeout) → before PR, on magicmirror2. Asked user whether to PR the two Docker bugs to main separately.
+- Task 6c: complete at e3a08225 (I1/I2/M1 fixed; reconciler exists before modules load — TWCMaster.__init__ — verified). lib 26971 (+39). Suite 2332+1xf. M2 live Docker smoke test pending (before PR).
+- Task 8: dispatched (opus) BASE e3a08225.
+- User 2026-10-21: yes, downlevel PRs for the Docker bugs (main + release/1.3.4). Agent preparing branches fix/docker-ble-exec and port-docker-ble-exec-1.3.4 + drafts in .superpowers/pr-drafts/docker-ble-exec-*.md; push/open awaits user OK.
+- Live Docker check (magicmirror2): nsenter into /rootns/net needs CAP_SYS_PTRACE (Permission denied without; apparmor/pid=host don't help). Downlevel branches amended to add it to contrib/docker/docker-compose.yml. TODO phase6: same compose change (carry when phase6 rebases onto a main with it, or add in Task 10 docs/compose).
+- Task 8: implemented 175948ca (lib −65; parity untouched, 113 pass; suite 2332+1xf). Ruling: rule (k) / freshFor skipped — asleep() already trusts an asleep answer of any age and every awake cadence ≤ REACH_WINDOW, so it changes nothing at defaults; a test pins the invariant. — cost if wrong: one extra pre-command ping when homeAwakeSecs is configured > 300 s. Note for Task 10: Powerwall still reads cloudUpdateInterval; shipped configs set it → reword the INFO line/config comments. Review dispatched (opus).
+- Docker fix PRs opened 2026-10-21: ngardiner/TWCManager#711 (main, 27f479b7), #712 (release/1.3.4, c8a62cc1); cross-referenced.
+- Task 8 review: PASS / APPROVE minor. Paid paths bounded; boot list load equivalent (TeslaMate sync now ≤300 s). Fix round 1 sent (1,3–7). For Task 10 changelog: power start reads HOME cars only (HA used to refresh all); Tasks 8+9 ship together.
+- Task 8: complete at c398f77f (minor fixes verified via report; new HA test fails on old code). lib 26900 (−71). Suite 2333+1xf. Parity unchanged.
+- Task 9: dispatched (sonnet) BASE c398f77f.
+- Task 9: implemented 3d53fd62 (+29; suite 2338+1xf). Review dispatched (sonnet).
+- Task 9 review: PASS / APPROVE w/ fixes (via None for no-status-source car). Fix round 1 sent. 6c's scan reason is on the vehicle detail page (confirmed).
+- Task 9: complete at be41b55d (pollEMS seam +6 accepted — tests a real master instead of source text). lib 26932. Suite 2338+1xf.
+- Task 10: dispatched (sonnet) BASE be41b55d with controller additions appended to the brief.
+- Task 10: implemented 8a377b4c (docs, changelog, compose SYS_PTRACE, config comments). Review dispatched (sonnet).
+- Task 10 doc review: 5 inaccuracies + smaller points (docs fix round pending).
+- Ruling (code): a lost car with no TeslaAPI status source must not stop on a stale "asleep" — nothing can refresh it and the car wakes unseen to drive home; it follows the back-off (fast within awayAsleepSecs of lastLife, then awayAsleepSecs) whatever its last state. Cloud-sourced lost cars keep the asleep gate. — cost if wrong: one scan per 30 min for a truly asleep BLE-only away car.
+- Ruling (code): drop the "car reads ignore cloudUpdateInterval" INFO line — every shipped config sets the key for the Powerwall, so it fires on every install; the docs say it. — cost if wrong: a user who set it for cars gets no log hint.
+- Watch fix commit 0d3146e5 (lost no-cloud car ignores stale asleep; cloudUpdateInterval log removed). lib 26930, Watch.py 374, suite 2337+1xf. Docs fix round sent to Task 10 agent.
+- Task 10: complete at fea5cb7c (docs corrected). Next: Task 11 live run on the box.
+- Task 11: deployed deploy/phase6-diag 52f65c48 (fea5cb7c + DIAG) to box 2026-10-21 00:51; rollback 4fb93456; backups ~/twcmanager-*-<ts>-phase6. Clean start; SolarEdge Endian import error pre-existing. Page: 'Not watched: named by TWC 8244' (car plugged). Pending user-driven checks: departure/arrival, tunnel-down test, overnight charge reads.
+- Final whole-branch review dispatched (fable) 52a2652c..fea5cb7c → final-review.md.
+- Final review (fable): NOT READY — C1 + I1–I4 + M1–M9. Rulings:
+  - C1 fix: second-miss scan regardless of a stale asleep (a present asleep car answers VCSEC).
+  - I1 implement the spec: an awake car's door OPEN edge → one exempt EVENT read (free BLE first). Docs stay.
+  - I2 fix: no-scan install, a HOME car whose pings miss twice → cloud status (if any) plus one courtesy-bounded event ask.
+  - I3 fix (anti-goal: never keep a car awake): EMS "up" reads debounced per car by sleepCourtesySecs.
+  - I4 fix: a TWC-named car read over the cloud uses the cloud charging cadence (900 s).
+  - M1: re-ask a failed event read once, at the routine cadence (not every pass).
+  - M3, M4, M5 (via a shared lost/scan decision helper), M6, M8 fix.
+  - M2, M7 accepted (bounded: ≤ a day's capacity after a crash; few cars).
+  - M9 note only.
+  - Take the size cuts.
+  One fix dispatch (opus) then a scoped re-review.
+- Final fixes: 01ed66fe, 3b1e3c19, 9fa1d9eb (lib +11 → 26941; Watch.py 392; suite 2344+1xf; parity unchanged). Scoped re-review (opus).
+- Final fix re-review: all addressed except I2 (repeats ~60/day; ruling: once per loss episode) + 2 minors (status via, M1 retry keeps exempt flag). Round 2 sent.
+- Final fix round 2: 7e2eb1d5 (I2 once per loss episode; status source; retry keeps exempt). lib 26956, Watch.py 407; suite 2347+1xf; parity unchanged. Final review findings resolved. Redeployed box: deploy/phase6-diag fee2920a (7e2eb1d5 + DIAG), rollback 52f65c48; clean start. Remaining: live checks (departure/arrival, tunnel-down, overnight charge), then PR (base vehicle-model/phase5 → needs Phase 5 PR first).
+- Feed-down test 2026-10-21 10:12: TeslaMate syncTelemetry set false in box config (backup ~/twcmanager-config-feedtest-*), restarted. Firewall approach abandoned (no cgroup match; v6 rule removed, verified 0 rules). Car home, unplugged by user. Page: 'Watched: online … via ble, next in 4 min; budget $0.10'. Monitor running. RESTORE syncTelemetry true after test.
+- Feed-down live test results (10:12–10:46): watch took over at once after restart (BLE ping, online, home-awake 240 s cadence); car slept ~10:30 despite 4-min pings; then 15-min asleep cadence; zero reads, zero paid, no tracebacks. syncTelemetry restored 10:46 → "Not watched: covered by TeslaMateVehicle". Box config back to original.
+- Follow-up noted: the post-start telemetry grace counts a feed module whose telemetry sync is off; capped at 60 s, harmless, but should skip it.
+- Not yet exercised live: departure with the feed down (C1 path), arrival scan/read, overnight named-car charging reads (no charge needed last night).
+- 2026-10-21 ~10:50: user OK'd leaving TeslaMate telemetry off for a day or so; box syncTelemetry=false (line 175) and restarted. RESTORE to true afterwards and restart.
+- 2026-10-21: main moved (#702, #711 merged; maintainer commit bd5a7603 per-vehicle charge queue + 60 s rate limit + cancel_stop, closes #667). Phase 1 conflicts in TWCMaster, TeslaAPI, VehicleCommandQueue, tests. Restack of phase1..6 + #707 delegated (fable) per restack-main-brief.md into restack2/* branches; push by user.
+- User 2026-10-21: scrub personal data while rewriting history. Found: car name in ~10 test files (main's test_telemetry_mapping too); real home coords (0.0 km) in tests/unit/reconcile_helpers.py HOME since phase3 commit 'Locate cars from their latest free position…' — public on origin phase3/3.5/4 PR branches. Sent scrub to restack agent (placeholder name, HOME (40.0,-75.0) with same AWAY offset). Fork planning branch docs/vehicle-model-planning also has the car name (6 files) and the home latitude in a live-fail log — needs a separate scrub (ask user).
+- Planning branch scrub: local branch planning-scrubbed 7b1ddee2 (single root commit, car name→TestCar in 6 files, home latitude→'<home latitude>' in live-fail log). Old fork tip f2be0f60. Push by user.
+- User 2026-10-21: Phase 3.5's two differences from main stand (slot-wide Owner retirement on 410/412; Owner ahead of Fleet for off cars with both tokens). Independent restack review (opus) running → restack-review.md.
+- Restack review (opus): fix first — 1 duplicate #667 changelog, 2 Phase 3 asleep rule uses Fleet slot, 3 two #702 tests lost at 3.5, 4 Owner-first error message tells Fleet users they need a Fleet token (reword; ranking stays per user), 5 changelog note for slot-wide retirement, 6 Phase 1 wording. Sent to restacker.
+- Restack done after review fixes: phase1 8070d5c3, phase2 4b012c27, phase3 aa9a7b99, phase3.5 a765b6f4, phase4 7432894b, phase5 cf89bf5f, phase6 198c94f3, 707 1255db41; all tips pass; parity identical; scrub clean. Push command given to user (leases on 45c21341/ff4eba64/4998127b/b55af397/3aa44301/e3dfc3b4). Next: after push, move local vehicle-model/* branches + worktrees; apply Phase 5 final-review-2 fixes on phase5 then rebase phase6; redeploy box.
+- Pushed by user 2026-10-21; remote tips verified. Local vehicle-model/* moved to restack2 tips (old kept as backup/*-pre-mainrestack). CI watch running. Phase 5 final-fix-2 dispatched (opus) on phase5 cf89bf5f.
+- User 2026-10-21: rebase Phase 6 onto fixed Phase 5 (36e69be6) and do a joint soak. Rebase + follow-up (watch status checks replace reconciler's Fleet-asleep re-check for watched cars) dispatched (opus).
+- Joint soak deployed 2026-10-21 17:54: deploy/phase6-diag 8799e6c1 (phase6 b613a784 on phase5 36e69be6 + DIAG); rollback fee2920a; settings backup ~/twcmanager-settings-*-joint. TeslaMate syncTelemetry still false. Clean start; car out of BLE range (scan miss 17:52 & 17:54); page 'Watched: no answer … via cloud'.
+- 2026-10-21: spec addendum drafted (API-only presence rule) at end of specs/2026-10-20-vehicle-watch-design.md; awaiting user approval; one open point (cloud status as scan gate in BLE+API installs).
+- User 2026-10-21: BLE installs never poll the cloud for presence; only while a Fleet command is held (reverses 2026-10-20 'lost car with cloud scanned only while cloud says awake'). Addendum updated.
+- User 2026-10-21: paid charging reads minimal (only when a policy reads battery); free charging reads as now. Addendum updated.
+- User 2026-10-21: addendum approved; build it, then squash Phase 6 so the replaced paths never appear. Task 12 dispatched (opus) BASE b613a784. After review: squash phase6 into logical commits (tree-identical), re-verify, redeploy.
+- Task 12: ee65ba2b (lib +9; Watch.py 407→404; suite 2381+1xf; parity unchanged). cloudOnly = watched + TeslaAPI + BLE module not loaded; Policy.readsBattery. Accepted: Owner charging reads at 300 s (user: fine for free); a charging Fleet car with no battery policy that unplugs and drives off is caught at sleep/next wake (fairness only). Review dispatched (opus).
+- Task 12 review: issues — I1 (module loaded ≠ BLE usable), I2 docs, I3 untested lastRead term, size cuts S1–S3. Ruling I1: BLE unusable = module not loaded OR scan readiness says radio can't work (no controller / powered off / bluetoothd down); Docker-without-bluetoothctl still counts as BLE (pings work). Install-level, no per-car lost→cloud switching (keeps user's 'BLE installs don't poll the cloud'). Fix round 1 sent.
+- Task 12 fix round 1: ac3e74a1 (radioUp(); lib 27047 (+11); Watch.py 404; suite 2384+1xf; parity unchanged). Re-review (sonnet).
+- Task 12 complete at ac3e74a1 (re-review all addressed). Backup backup/phase6-pre-squash. Next: squash Phase 6.
+- Phase 6 squashed: 10 commits, tip 62a0e08c (tree = ac3e74a1); every commit passes (2277→2384). vehicle-model/phase6 moved to it. Box redeployed deploy/phase6-diag d62b20f3 (62a0e08c + DIAG), rollback 8799e6c1; clean start; car home, TWC-named. TeslaMate telemetry still off.
+- User 2026-10-21: run joint soak as-is until ~9 AM 10-22, then disable BLE too (API-only test). One-shot reminder scheduled 10-22 09:03 (session-only).
+- 2026-10-22: overnight charge MISSED on joint-soak build. Evidence: TWC 8244 held at 6 A max (master 09 0 A) from 21:24 to 07:08 incl. Scheduled Charging at 00:00; limit held 'asleep' at 00:00. Root-cause debug dispatched (fable) → overnight-miss-2026-10-22.md. API-only test (BLE off) on hold until fixed — the 09:03 reminder should be skipped/deferred.
+- 2026-10-22: root cause of missed charge = pilot used as car max (Phase 2 60836e47) + min-of-members (Phase 3) — see overnight-miss-2026-10-22.md. Box hotfix 95688133 (box-only) deployed 07:54; car unplugged 07:48 so unverified until next plug-in. User: fix as a new commit on Phase 2, rebase the rest. Dispatched (opus) → pilotfix-report.md. Webhook token appeared in debugger transcript (told user).
+- Pilot fix: phase2 94140b9a (new commit) + rebased tips (phase3 cbe4822b, 3.5 261a66b1, 4 a844c07a, 5 ddec49ae, 6 44f08d50, 707 ba4e4a46); parity unchanged; lib +57. Box redeployed with 44f08d50 + DIAG (replaces box-only hotfix). Full suite at 4 modified commits running; independent review (opus) running.
+- User: hold the API-only test ('Let's wait'); 9:03 reminder cancelled. Box now on proper fix build 8637c2f7 (44f08d50+DIAG); rollback to hotfix 95688133.
+- Pilot-fix review: fix first. F1 hardware gate: confirm chargeCurrentRequestMax stays at the car's max (48) under a low TWC pilot — no persisted/logged evidence on box; do a BLE state-charge read after tonight's plug-in (and at a low pilot when possible). F2 lift regression, F3 INFO gate, F4 slim → sent to fixer. F5 (budget priced at 240 V vs measured TWC V, exact 6 A → 0) pre-existing on main → separate issue/PR later.
+- 2026-10-22 08:45: plug-in after a trip: charge offer 47-48 A (pilot fix works live); BLE read before/after: chargeCurrentRequestMax 48 both (pilot was 48 — low-pilot check still pending). Session left anonymous at 08:45:48 (car NOT_HOME after BLE loss; 30-min back-off); scan 08:46:10 → named. User approved: on a plug-in with no candidate, scan first (old checkArrival idea) — new Phase 5 commit, sent to the pilot-fix agent after its round. NOTE: a debug fallback printed the car's stored homeLocation into the transcript (not in files); script fixed.
+- Pilot fix r2 + Phase 5 scan-on-anonymous-plug: tips phase2 ccecae62, 3 bd73ffff, 3.5 1bcded30, 4 bbfc4d85, 5 c02bb803, 6 3c38c2eb, 707 a3613b71; parity unchanged. Asked for docs/CHANGELOG lines + full suite at the 5 fixup-modified commits. Box deploy held until the low-pilot BLE read completes (box runs 44f08d50 r1 fix, not the bug).
+- Live bug 2026-10-22: after naming at 08:46:10 the 50% limit was held 'driving' (stale drive evidence, no drive end with TeslaMate off) while plugged and charging; car left at 51%. Fix requested: plug-in/charging newer than driving evidence ⇒ not driving (Phase 5).
+- Box hotfix a012faf0 (box only): drivingNow ignores driving evidence older than the plugIn mark; targeted tests 278 pass; deployed before the car's return; rollback 8637c2f7. Monitor: plug-in → limit → 6 A pilot → BLE read.
+- Pilot fix final: phase2 26fc3f3d, 3 fe9eca64, 3.5 4c00d9a6, 4 0e3e5687, 5 b92d35c1 (adds 'Stop treating a plugged-in car as driving'), 6 bba534df, 707 2d565e48; full suite at tips and the 5 fixup commits; parity identical. Push command to user.
+- Box: deployed bba534df+DIAG (f5cbc6d1), rollback a012faf0. CI: #704/#705/#706/#707 green; #710 Py3.8 test_sigterm_shutdown hang (passes locally 3/3) — rerun of failed job requested with user OK.
+
+## 2026-10-22: #710 CI rerun
+- The rerun did not hang in the shutdown test. It failed in test_an_incomplete_vehicle_data_answer_logs_what_is_missing instead: a stray DEBUG line from another test's TeslaMate thread.
+- Fix 87a9eff1 on phase3.5: filter caplog to the TeslaAPI logger.
+- Rebased: phase4 f1e98620, phase5 ca6edebe, phase6 d708243e.
+- Suite on phase6: 2398 passed, 1 xfailed.
+- Not pushed. phase3.5 is a fast-forward; phase4 needs a force-push.
+- 2026-10-22 14:12: user asked for the API-only test (BLE off) overnight and tomorrow. Config backup: /etc/twcmanager/config.json.pre-apionly; added vehicle.teslaBLE.enabled=false.
+- Bug: the documented switch did nothing in the stack. The TeslaBLE provider registered anyway (Phase 2), so commands still went over BLE. Main is fine: getModuleByName honours enabled(). The loader's enabled check looks under "Vehicle", not "vehicle".
+- Fix on phase2: TeslaBLE releases itself in __init__ when disabled, and a class-level _dbus_session_pid default keeps __del__ quiet. Test test_a_disabled_ble_module_registers_no_provider, mutation-checked.
+- New tips: p2 4c40dd70, p3 f933cbe5, 3.5 f6eb5261, 4 3c4b865b, 5 72e758ff, 6 c22dba66, 707 71227c1a.
+- Suites: p2 1533, p4 1988, p6 2399 passed (1 xfailed each). None pushed.
+- Box: 1b354145 (c22dba66 + DIAG), rollback f5cbc6d1. Providers: Gen2TWC, OwnerAPI, FleetAPI, HomeAssistant.
+- First paid command: the setAmps resend at restart (car awake).
+- 2026-10-22 API-only cycle: return fine (home at 16:22 before plug-in, limit over Fleet, charged 47-48 A). Departure seen 12.5 min late: the edge check at 14:49:36 got None (the cloud's online answer still asleep after the unplug), so the unplug waited for the next 15-min status check at 15:01.
+- User approved a follow-up. phase5 a7f11121: an edge check that answers None and no True runs once more at edge+120 s (TWCSlave.RECHECK_WAIT, recheck/rechecked). Test test_an_edge_no_check_answered_is_checked_once_more, mutation-checked twice.
+- Ruling: parity row test_gen2_steady_00_after_link gains one free BLE ping (pings [VIN, VIN]); paid unchanged (0,0,0). The extra ping is the approved follow-up. The BLE path gets it too, since it costs nothing.
+- Docs: PolicyCustomization and CHANGELOG updated.
+- Suites: p5 2287, p6 56ea6ea6 2403. Box 16ea980e (+DIAG), rollback 1b354145.
+- 2026-10-23 API-only overnight:
+  - The follow-up check worked at 08:58: unplug recorded at +2 min. At 18:06 the cloud still lagged past 2 min (seen at +7 min).
+  - Midnight wake_up answered "offline" and was counted as failed, though the car woke; the limit went 5 min late.
+  - charge_start was blind-retried while the TWC drew 48 A.
+  - The held-asleep limit was re-logged every 15 min.
+  - Spend: $0.028.
+- User approved all three fixes. Ruling: all go on phase5 (unpushed), not on the phases that introduced the code, to avoid more force-pushes of phases 2–4 — cost if wrong: an older phase keeps the bug until rebase.
+- Brief: apionly-fixes-brief.md. Dispatched opus implementer.
+- API-only fixes: phase5 01bbedb4, d770b716, 3027a953; phase6 8e2afe2f.
+- Review (opus): spec PASS; quality approve-with-fixes, I1 plus M1–M7.
+- Rulings:
+  - Fix I1, M1, M2, M5, M6, M7.
+  - M3 accepted. Freshness covers it, and a start adds nothing while the TWC delivers current — cost if wrong: a start delayed until the next reading.
+  - M4: reproduce; fix only if ≤6 lines.
+- Fix round 1 sent to the implementer.
+- 2026-10-23 12:48: BUG. Home moved 4.2 km to the 12:39 away fix at a TWC VIN read: the fix was 9 min old, under HOME_FIX_MAX_AGE. The limit was held "not here".
+  - Restored homeLat/homeLon from ~/twcmanager-settings-20261021-1754-joint at 12:59. Bad settings saved to ~/twcmanager-settings-20261023-badhome.
+  - After the restart: presence=home, limit sent 13:00.
+  - Brief homefix-brief.md; dispatch after the r1 re-review completes.
+- Departure 12:19 → seen 12:39 (20 min): the cloud lag beat the 2-min follow-up again.
+- r1 re-review (sonnet): APPROVED; residual minor: a BLE→Owner amps fallback can wait 15/30 min. Ruling: park — cost: a rate change late by up to 30 min on a BLE install whose radio dropped. Home fix dispatched to the implementer on phase5 b48dd13b.
+- Home fix: phase5 6a8275d6, phase6 dbd91043.
+- Review (opus): spec PASS; changes needed, 2 Important and 3 Minor.
+- Rulings:
+  - I1: the watch keeps the reading's time for cadence, courtesy and return time; GPS time is only for the presence decision and the outside mark. Cost if wrong: a slightly early return estimate.
+  - I2: a GPS time counts only when it came from the same read as the position (same source, within 1–2 s); else the reading's time.
+  - Minors: fix only if trivial.
+- Fix round sent to the implementer.
+- USER 2026-10-23: narrower rule. A non-BLE position must be READ at or after the plug-in (observation time, no slack). Ruling: drop the GPS-time dating of the outside mark, presence and watch (the source of review I1/I2); park late-delivered stale fixes. Redirect sent to the implementer.
+- Home fix: r3 re-review (sonnet) APPROVED. I fixed M2 (docs: only BLE or the Settings page moves an existing home) and M3 (comment) myself.
+- Phase 5 tip 7e7d3517. Phase 5 commits on top of b92d35c1-era base: a7f11121 recheck, 48474e05 wake polls, ee237bd4 TWC current, b48dd13b hold recheck, 7e7d3517 home.
+- Phase 6 tip f538b780; suite 2418 passed, 1 xfailed.
+- Box 14:01: c1ab77fb (+DIAG), rollback 16ea980e; settings backup ~/twcmanager-settings-20261023-predeploy. Car asleep, limit held asleep, home intact.
+- Pending a user decision: should a cloud position after the VIN read move an existing home? Currently no (counted as a departure); recommended to keep.
+- 2026-10-23: the Fleet 'Data' requests in Tesla's dashboard came mostly from another app sharing the account; the user fixed that app. TWCManager's own Fleet data traffic: the pre-command online check (wakeOutcome uses the command slot, TeslaAPI.py:1521) plus wake polls, and the daily telemetry-config check. Owner-first change offered, not requested. Tesla's billing page says every request with status <500 is billable, so the 'free' vehicles/{vin} on Fleet is likely billed — open question for Fleet-only installs.
+- User ruling 2026-10-23: the <500 rule only exempts error responses on charged endpoints; an endpoint documented as uncharged isn't billed. vehicles/{vin} stays free. Open question closed.
+- 2026-10-25 Docker check on magicmirror2 (arm64):
+  - The v1.3.4 and v1.3.3.post1 images are broken: "No module named TWCManager". Their Makefile docker target is build_pkg, not install_pkg; main fixed it in 02428483 and never backported.
+  - The 1.3.3/1.3.4 sample config.json doesn't parse: comma missing after the HomeAssistant block; main fixed it in c8ce9fd0.
+  - Branch fix/docker-1.3.4 (from release/1.3.4): c36ef3b6 Makefile, 8ae63c4f comma. Verified by a pip install inside the image: Dummy runs, web 200, nsenter reaches hci0.
+  - latest/main image: BLE disabled because tesla-control is not found. 3278ad2c dropped the /home/twcmanager/gobin fallback; the container runs as root (HOME=/root) and the binary isn't on PATH. The stack has the same lookup. A 1.4.0 blocker for Docker BLE.
+  - Branch docs/docker-compose-v1.4.0 (from main) 35250f50, plus a v1.3.4 compose file not yet committed.
+  - Test containers and /etc/twcmanager removed from magicmirror2; the docker-compose-v2 package stays installed.
+- Docker fixes built:
+  - main branch docs/docker-compose-v1.4.0: 35250f50 docs, 70bfa98d PATH (tested on a latest-derived image: binary found, nsenter reaches hci0), 6b3c517f v1.3.4 compose pinned to v1.3.4.post1.
+  - release/1.3.4 branch fix/docker-1.3.4: c36ef3b6 Makefile, 8ae63c4f comma.
+  - Drafts: pr-drafts/docker-compose-v1.4.0.md and docker-1.3.4.md. Awaiting OK to push and open PRs.
+  - The stack picks up the Dockerfile fix on restack.
+- User: a post release should move the base tag, and minor tags should follow the newest patch. Workflow change on both branches: main 9a23fb8f, release/1.3.4 00d32702. The v1.3.4 compose is repinned to v1.3.4 (6ae14ae3). PR drafts updated. Awaiting OK to push and open the PRs.
+- Tag logic split into its own PRs (user): ci/docker-moving-tags 1676b0c8 (main) and ci/docker-moving-tags-1.3.4 ac3b1065. Fix branches now: docs/docker-compose-v1.4.0 (35250f50, 70bfa98d, 6ae14ae3); fix/docker-1.3.4 (c36ef3b6, 8ae63c4f). Drafts: docker-compose-v1.4.0.md, docker-1.3.4.md, docker-moving-tags.md (used for both tag PRs).
+- PRs opened 2026-10-25: #717 (main docker fixes), #718 (1.3.4 fixes), #719 (tags main), #720 (tags 1.3.4); cross-refs filled. Release tracker updated: new rows docker-images-140 and docker-moving-tags; vehicle-model retargeted to 1.4.1; #711/#712 marked merged.
+- 2026-10-26 upstream state:
+  - Merged: #703 (phase1, as-is: merge 9ef97b2f onto the v1.4.0 changelog commit; its entries are under "v1.4.1 - Upcoming"), #717–#720.
+  - ngardiner d814be60 gave main's #689 tests a well-formed VIN.
+  - Tags v1.4.0 (f3d1d7cf, without phase1) and v1.3.4.post1. Docker Hub has v1.4.0, v1.4, v1.3.4.post1, v1.3.4, v1.3, so the moving tags work.
+  - PyPI jobs fail with test.pypi 403 (2FA); PyPI's newest is still 1.3.2.
+  - Open: #704, #705, #706, #710, #707. #704's base is still vehicle-model/phase1 and needs retargeting to main. Phases 5 and 6 are unopened.
+  - Trial rebase of phase2 onto main: 4 conflict stops (CHANGELOG; VehiclePriority + test vs e3710ec9; TeslaAPIEVSE vs #714; TWCMaster distributor vs #716/3ba22d0f). Later phases expected to conflict with #689/#690 in TeslaAPI.
+- 2026-10-26 restack3 dispatched (opus): brief restack3-brief.md. Folds late fixes; rebases phases 2–6 and #707 onto main d814be60. Issue #722 opened (PyPI 403).
+- Box review, API-only, c1ab77fb (journal retained only from 10-25 ~15:00):
+  - 0 warnings or tracebacks; no restarts since 10-23 14:01.
+  - Midnight: limit held asleep once. Correct: the battery was already 70% = the scheduled limit (TeslaMate).
+  - 07:10–07:37 TWC session was preconditioning (battery unchanged).
+  - 07:37 unplug, then the check, departure seen at +24 s.
+  - 08:57 home → apply; 09:17 away → restore; 09:24 plug → apply + amps. This matches TeslaMate drives (an errand), so these are the correct Fleet-shuffle costs.
+  - Paid in window: 5 commands ($0.005), 0 wakes, 0 blind retries.
+- 2026-10-26 10:57: BLE and TeslaMate syncTelemetry re-enabled (backup config.json.pre-reenable). Providers: Gen2TWC, TeslaBLE, OwnerAPI, FleetAPI, HomeAssistant. Car asleep at home. API-only soak ended. User idea for later: a non-TWC soak (TWC held at 48 A by a hands-on setting or a separate fakeMaster loop; the real install without the serial interface).
+- 2026-10-26: box journal was RAM-only (RPi OS 40-rpi-volatile-storage.conf, Storage=volatile; /run is 86M, so about 2 days). Added /etc/systemd/journald.conf.d/60-persistent-storage.conf (Storage=persistent) and flushed; now 16M in /var/log/journal, capped by the playbook's SystemMaxUse=300M. homelab-compose only lineinfiles journald.conf (debian-ubuntu-base.yml:232), so no rollback; the drop-in is not in the repo.
+- 2026-10-26 15:01: ngardiner merged #704 (Phase 2 head 26fc3f3d) into main as 02822e74 and closed it by hand.
+  - His resolutions: measured-voltage budget kept in the stack distributor; VehiclePriority enabled() + providers(); TeslaAPIEVSE deleted with the #714 test ported to VehicleEndpoint. CI green.
+- restack3 paused after folding (tree-identical, restack3/* on 8070d5c3). Revised plan sent:
+  - base 02822e74;
+  - 4c40dd70 becomes a separate PR, fix/disabled-teslable;
+  - phases 3–6 rebased from the folded branches; #707 onto main;
+  - drop CHANGELOG bugfix lines for stack-only bugs; reword c0f91bc6.
+- USER: skip the soak (maintainer actively merging). After restack: review, then push and update PRs straight away.
+- 2026-10-26: GitHub stack 708 unstacked (GH_REPO=ngardiner/TWCManager gh stack unstack 708; gh stack needs GH_REPO because this checkout has several remotes). #705 and #707 retargeted to main (#705: 19 commits, 118 files; #707: 1 commit). After the restack push: relink with GH_REPO=ngardiner/TWCManager gh stack link 705 706 710 <p5> <p6>. User commented on #705 asking the maintainer to hold.
+- 2026-10-26: #724 opened (fix/disabled-teslable 09c60309, suite 1584 passed; mutation checked). Reviewer on restacked p3/3.5/4 + fix (restack3-r1-review.md) running. Phase 5/6 PR drafts written; I corrected the Phase 6 replay claim (it is a test, not a feature). Placeholders SUITE_COUNT, PR_PHASE5, PR_PHASE6, and the parity-identical claim, wait for restack3-report.
+- #724: added 33aef75b (registerProviders skips modules whose enabled() is False; TeslaAPI had the same hole). Suite 1585. Body and title updated. PR left as draft (the user marked it).
+- restack3 r1 review (opus): spec PASS, quality PASS, 7 Minor. Guarantees #714/#716/e3710ec9/#689/#690 verified; folds intact. Ruling: fix M2–M7 before the push (M2 matters for the maintainer reviewing #710: his RLock is replaced); queued to the restack agent after its verify. M1 ignored.
+- 2026-10-26: Phase 6 +7011795a: getChargerLoad counts Gen3 units + watched cars charging at home (moved from Watch.unexplainedWatts; Gen3 gap existed in 1.4.0). Suite 2465; mutation checked; parity unchanged; lib +10; CHANGELOG v1.4.1 bugfix line. Pushed (fast-forward). Phase 6 draft updated. Waiting on the user's force-push of phase3/3.5/4/707.
+- 2026-10-26 (before the user's force-push landed): maintainer merged #705 (old fe9eca64) as ec9ecefb, #707 (old 2d565e48) as b035a64e, and #706 (old 87a9eff1) as 686b36ec, with his own resolutions. His _classify guard for a replaced token = our _request version (equivalent).
+  - The user's push then moved phase3/3.5/707 branches to restacked tips; those are moot now.
+  - #710 still open, base vehicle-model/phase3.5 (merged); retarget to main after the restack4 push.
+  - restack4 dispatched: phase4–6 onto 686b36ec, carrying the CHANGELOG fixes (M6/M7, dropped stack-only lines).
+- 2026-10-26: pushed restack4 (user); phase4 eb7e65e0, phase5 a50ff0de, phase6 a97abeff. #710 retargeted to main and body updated. Opened #725 (Phase 5) and #726 (Phase 6); cross-refs filled; GitHub stack #727 = 710→725→726. Tracker updated (vehicle-model row, new disabled-modules row for #724, status).
+- 2026-10-26 14:45: TWC-less soak started on the box, code 06a51067 (Phase 6 tip a97abeff + DIAG); previous c1ab77fb.
+  - Fake master: twcmanager-fakemaster.service (enabled), BindPaths /etc/twcmanager-fakemaster → /etc/twcmanager; HTTP 8081; all vehicle modules and sources off except TeslaAPI (no tokens); teslaControlPath bogus; settings chargeNowAmps 48 until 2027-10-26. TWC 8244 linked, offering 48 A.
+  - Real install: interface.RS485.enabled=false (backup config.json.pre-twcless); BLE + TeslaMate + Owner/Fleet; no serial traffic. Car "covered by TeslaMateVehicle".
+  - Rollback: `sudo systemctl disable --now twcmanager-fakemaster`; copy /etc/twcmanager/config.json.pre-twcless back over config.json; restart twcmanager.
+- BUG found: vehicle.teslaAPI.enabled=false crashes startup ('NoneType' has no attribute 'migrateSavedTokens', TWCMaster.loadSettings). Present on main (1.4.0) and release/1.3.4 (1.3.4.post1), since #692. Fix PRs needed on both (and the stack inherits it).
+- 2026-10-26: #728 (main 3e00e573) and #729 (release/1.3.4 043c2512): start and run with vehicle.teslaAPI.enabled=false. Main: 7 sites (load/save, Targets x2, Policy override, Powerwall, HTTP paste, WebIPC x2). 1.3.4: 11 sites. Bug existed since 1.3.3 (not #692). Tests mutation-checked; main suite 2024; 1.3.4 suite = baseline (62 pre-existing env failures). Phase 6 tip adds no new unguarded lookups; it inherits #728 on rebase. Answered: TWCProtocol always loads (190-line message builder, no I/O); fine to leave.
+- 2026-10-26: TWC-less UI showed 0 A offered and no generation/consumption.
+  - Cause 1 (pre-existing on main and 1.3.4): EMS polled only under a green policy, alwaysPollEMS or maxAmpsAllowedFromGrid. That also starved the watch's consumption step.
+  - Cause 2: the header sums Gen2 TWC offers only.
+  - Box: added policy.alwaysPollEMS=true (backup config.json.pre-alwayspoll).
+  - Phase 6:
+    - 9c83af13: the watch asks for an EMS poll while emsTrigger is on, an EMS source is loaded and a car is watched. The watched-car condition came after the shutdown test hung: polling with no watched car kept the background queue busy.
+    - 6bde71dc: the offered total includes the desired amps of car-only charging points.
+  - Suite 2458, exit 0.
+  - MISTAKE: pushed ac3aa494 with a failing test (a `&& tail` chain hid pytest's exit code). Fixed by folding; needs a user force-push of phase6 (lease ac3aa494 → 6bde71dc).
+  - Box 24b33142 (6bde71dc + DIAG).
+  - #726 body updated.
+- 2026-10-26: a parallel session (vehicle images, Mike's OK) has an uncommitted overlay on the box. My 24b33142 deploy happened before its notice and carried the overlay intact (no overlapping files). Told it. Further box deploys: coordinate with that session first.
+- phase6 force-pushed by user: 6bde71dc.
+- 2026-10-26: watch line 'covered by' shown via sourceName (TeslaMate not TeslaMateVehicle); COVERED const in Watch.py; folded into 'Run the watch on the control tick'. New phase6 tip d004b603 (branch phase6-sourcename in wt-r3), suite 2458 passed 1 xfailed. Awaiting user force-push.
+- 2026-10-26: box deployed b45b5100 (d004b603 + DIAG), image overlay reapplied; backups ~/overlay-backup-20261026-161701.patch, ~/overlay-untracked-20261026-161701.tgz. Rollback: checkout 24b33142 with same Watch overlay dance.
+- 2026-10-26: phase6 force-pushed by user: d004b603 (#726, 14 commits).
+- 2026-10-26: docs refresh for 1.4.1 started: branch docs/1.4.1 (wt-docs, base phase6 d004b603); brief docs141-brief.md; Opus agent auditing+writing; outputs docs141-gaps.md, docs141-report.md.
+- 2026-10-26: docs PR #730 opened (docs/1.4.1 @235249dc, base vehicle-model/phase6), linked to stack.
+- 2026-10-26: charger load counts feed-covered cars (folded into 'Count every charger the meter sees'); phase6 tip 78d06c36 local branch phase6-fold in worktree agitated-roentgen-2f67f3, suite 2459 passed 1 xfailed. feat/charge-history c17590ea on top (history from charger load on control tick), unpushed, no PR yet. Awaiting user force-push of phase6.
+- 2026-10-26: box deployed 6282806a (phase6-fold 78d06c36 + charge-history c17590ea + DIAG), overlay reapplied; backups ~/overlay-backup-20261026-201542.patch/.tgz. Parent BLE-threading session folding template+PTRACE changelog fix onto 78d06c36; push pending its tip.
+- 2026-10-26: phase6 final candidate 1a0b7d67 (peer: 78d06c36 + settings home text commit + PTRACE changelog fold), docs/1.4.1 restacked by peer 62d3a601. feat/charge-history restacked 772842e1. User to push phase6 lease d004b603, docs lease 235249dc.
+- 2026-10-26: phase6 pushed 1a0b7d67 (fork's 78d06c36 + settings home text + changelog PTRACE fix; suite 2459/1xf). docs/1.4.1 pushed 62d3a601, #730 marked ready. #726/#730 descriptions updated.
+- 2026-10-27: overnight no-wake bug (car-side point 'Complete' -> wantsToCharge False -> offered 0 -> whyQuiet 'nothing offered'). Fix + audit dispatched (opus): brief wantspower-brief.md, branch fix/car-side-wants-power in scratchpad/wt-fix on phase6 1a0b7d67. Scratchpad was wiped; venv rebuilt (py3.12 + requests_mock).
+- 2026-10-27: wants-power fix done after 3 review rounds: ef7be20f + 920c6505 on phase6 1a0b7d67 (suite 2480/1xf, parity unmoved, lib +70). Box deployed 206b96fc (fix + charge-history 772842e1 + DIAG), overlay reapplied, backups ~/overlay-backup-20261027-084221.*. Docs restacked onto 920c6505 in scratchpad/wt-docs2 (907f4012). Awaiting user pushes.
+- 2026-10-27: user found wants-power fix too complex. Ruling: decouple wake/start from per-car offer; admissible() = wouldCharge + headroom (avail - sum(min of drawing points) >= own min), first step toward #709 admission pass. Rebuilding fresh on 1a0b7d67 as fix/admit-would-charge (brief admit-brief.md, opus). Do NOT push fix/car-side-wants-power; box still runs it (206b96fc) until replacement.
+- 2026-10-27: admit fix d053ddc7 reviewed (fix first; 2nd Fleet wake confirmed skipped). User: build #709 now (WL allocation), desired charging follows admission (no stale stop), Fleet-only restart wake once. Opus building on wt-admit (brief twopass-brief.md). Plan: review, deploy box tonight, PR draft tomorrow.
+- 2026-10-27: twopass de7162d5 review (fable): fix first, 3 imp/12 minor. User rulings: hold start send (no withdraw); one startStopDelay hold both directions, stops timed in _followAdmission; accept unanswered-wake retries; keep wake on lower if battery below; keep no-point car start when budget. Rationale: car under limit gets a start when power available, wake carries limit or start. Fix round 1 dispatched to builder.
+- 2026-10-27: twopass re-review: 1 important (held drawing car-side/Gen3 keep last rate). User: accept oscillation; hold intent = scale to minima, wait, stop if scarcity persists; immediate stop under non-green policy; keep Gen2 >4A stop threshold; delete gate withdraw path. User's local TGE startStopDelay=300 rides out oven/dryer (local, not default; docs candidate). Fix round 2 dispatched.
+- TODO for tomorrow's #709 PR (docs, user-approved 2026-10-27):
+  - Settings.md startStopDelay: default 60; on Track Green Energy with cycling loads (oven, dryer) ~300 s rides out dips; local choice, not the default. The hold applies to every EVSE kind; cars drop to their minimum during it; a non-green policy stops at once.
+  - Settings/FAQ: use one scheduler, TWCManager's or the car's, not both; the car's departure mode may start early on a low idle offer; respectVehicleSchedule only stops TWCManager overriding the car's schedule.
+- 2026-10-27: opened ngardiner/TWCManager#732 fix/charge-history 9911b759 on main d8f036d1 (makes stray v1.4.1 changelog line true). Conflicts expected with fix/admit-would-charge in TWCSlave.py.
+- 2026-10-27: charge history PR #732 (fix/charge-history 9911b759 on main d8f036d1) opened by fork session. Overlaps fix/admit-would-charge in TWCSlave.py: second to merge drops history* fields, keeps new reportedAmpsActual comment. Mention in our PR description.
+- 2026-10-27 15:24: box deployed 79104db6 = d053ddc7 + b2cd5920 (two-pass, round 3) + charge-history 9911b759 (#732, TWCSlave conflict resolved) + DIAG. Suite 2509/1xf. Vehicle-image overlay removed; backup ~/overlay-backup-20261027-152438.* on box. getHistory 200.
+- 2026-10-28: PR #734 opened (fix/admit-would-charge 1de2c216 on main 4ff9e36e; suite 2471/1xf; lib +98). Tracker: page v2 (1.4.1 release, shipped strip, finished work behind toggle); 19 rows updated, charge-history row added.
+- 2026-10-28: box deployed 3c4eea4d = PR #734 tip 1de2c216 (on main 4ff9e36e, includes charge history + vehicle pictures) + DIAG. Rollback: 79104db6. Fleet paid since journal start (10-26): 5 set_charge_limit + 1 set_charging_amps = $0.006; watch budget $0.10 (full).
+- 2026-10-28: fleet spend feature built on feat/fleet-spend (scratchpad/wt-spend), 5 commits bd13c726..cb395fb8 on main 4ff9e36e; suite 2455/1xf; lib +279. Not pushed.
+- 2026-10-28: box deployed 2f4b095e = #734 1de2c216 + fleet spend (5 commits) + DIAG; combined suite 2501/1xf; rollback 3c4eea4d. PR draft .superpowers/pr-drafts/fleet-spend.md (not opened).

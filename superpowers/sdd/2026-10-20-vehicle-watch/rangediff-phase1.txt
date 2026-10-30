@@ -1,0 +1,903 @@
+ 1:  b95840bd !  1:  c418c653 Key vehicle commands by (cmd, vin) and add explicit cancellation
+    @@ Commit message
+         Key vehicle commands by (cmd, vin) and add explicit cancellation
+     
+         Every queued command coalesces per vehicle, with None as the distinct
+    -    "all vehicles" target. The stop-replaces-start rule lives in TWCMaster,
+    -    which cancels pending starts before queuing a stop and removes pending
+    -    stops in cancelStopCarsCharging. applyChargeLimit gets a vin only when
+    -    one is set, so modules without the parameter keep working.
+    +    "all vehicles" target. A charge command for every car overlaps one for a
+    +    single car, so the newer replaces the older; a car gets at most one
+    +    charge start or stop per minute, so a refused command is not retried
+    +    back to back. cancelStopCarsCharging removes pending stops through the
+    +    queue's generic cancel(), which leaves stops alone during shutdown.
+    +    applyChargeLimit gets a vin only when one is set, so modules without the
+    +    parameter keep working.
+     
+         Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+     
+    - ## CHANGELOG.md ##
+    -@@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+    -     * (@MikeBishop) - Shut down gracefully on SIGTERM, saving settings and sending pending stop-charging commands before exit (#668)
+    -     * (@MikeBishop) - Evaluate charging policy on its own thread instead of the RS485 loop, only when acting as master (#670)
+    - * Bugfixes
+    -+    * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+    -     * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+    -     * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+    -     * Fix: Correct invalid logging level in update_vehicle_data error handler which crashed when logging a failed API response
+    -
+      ## lib/TWCManager/TWCMaster.py ##
+     @@ lib/TWCManager/TWCMaster.py: class TWCMaster:
+    -         else:
+                  return 0
+      
+    --    def cancelStopCarsCharging(self):
+    --        self.delete_background_task({"cmd": "charge", "charge": False})
+    -+    def cancelStopCarsCharging(self, vin=None):
+    +     def cancelStopCarsCharging(self, vin=None):
+    +-        # Charge commands go to the vehicle command queue, not the background
+    +-        # task table, so a pending stop is cancelled there (closes #667).
+    +-        self.vehicleCommandQueue.cancel_stop(vin)
+     +        # Drop pending stop-charging commands for this VIN (or every VIN when
+     +        # vin is None). A vehicle-less stop applies to every car, so it is
+     +        # cancelled too. Returns how many were removed. Closes #667 for the
+    @@ lib/TWCManager/TWCMaster.py: class TWCMaster:
+     +        vin = vin or None
+              stopMode = int(self.settings.get("chargeStopMode", 1))
+              if stopMode == 1:
+    --            self.queue_background_task({"cmd": "charge", "charge": True})
+    -+            self.queue_background_task({"cmd": "charge", "charge": True, "vin": vin})
+    -             self.getModuleByName("Policy").clearOverride()
+    -         elif stopMode == 2:
+    -             self.settings["respondToSlaves"] = 1
+    +             self.queue_background_task({"cmd": "charge", "charge": True, "vin": vin})
+     @@ lib/TWCManager/TWCMaster.py: class TWCMaster:
+              # 1 = Stop the car(s) charging via the Tesla API
+              # 2 = Stop the car(s) charging by refusing to respond to slave TWCs
+    @@ lib/TWCManager/TWCMaster.py: class TWCMaster:
+     +        vin = vin or None
+              stopMode = int(self.settings.get("chargeStopMode", 1))
+              if stopMode == 1:
+    -+            # A pending start for this car (or for every car) is now moot.
+    -+            self.vehicleCommandQueue.cancel(
+    -+                "charge",
+    -+                lambda task: bool(task.get("charge"))
+    -+                and (vin is None or task.get("vin") in (vin, None)),
+    -+            )
+                  self.queue_background_task({"cmd": "charge", "charge": False, "vin": vin})
+    -             if self.stopTimeout == datetime.max:
+    -                 self.stopTimeout = datetime.now() + timedelta(seconds=10)
+     
+      ## lib/TWCManager/VehicleCommandQueue.py ##
+     @@
+      # time against the vehicle module (normally VehiclePriority), which keeps
+      # its synchronous BLE -> Fleet API fallback.
+      #
+    --# Pending commands coalesce: setChargeRate per vehicle, charge and
+    --# applyChargeLimit per command (matching the background task queue).
+    +-# Pending commands coalesce: setChargeRate and charge per vehicle,
+    +-# applyChargeLimit per command. A charge command without a vin applies to
+    +-# every car, so it replaces, and is replaced by, any pending charge command.
+     -# Stop-charging commands run before anything else.
+     +# Pending commands coalesce per (cmd, vin): a later command for the same
+     +# vehicle (or the same vehicle-less "all cars" target) replaces the pending
+    -+# one. Stop-charging commands run before anything else. cancel() lets the
+    -+# master drop pending entries that a newer decision has made moot.
+    - import collections
+    - import threading
+    - import traceback
+    ++# one. A charge command without a vin applies to every car, so it replaces,
+    ++# and is replaced by, any pending charge command. Stop-charging commands run
+    ++# before anything else. cancel() lets the master drop pending entries that a
+    ++# newer decision has made moot.
+    + #
+    + # A car gets at most one charge start/stop attempt per
+    + # CHARGE_COMMAND_INTERVAL. Callers re-request every loop while they want a
+     @@ lib/TWCManager/VehicleCommandQueue.py: from TWCManager.Logging.LoggerFactory import LoggerFactory
+      logger = LoggerFactory.get_logger("VehicleCommandQueue", "Vehicle")
+      
+    @@ lib/TWCManager/VehicleCommandQueue.py: from TWCManager.Logging.LoggerFactory imp
+     +
+     +
+      class VehicleCommandQueue:
+    +     CHARGE_COMMAND_INTERVAL = 60
+    + 
+          _DISPATCH = {
+              "charge": lambda module, task: module.car_api_charge(task),
+              "applyChargeLimit": lambda module, task: module.applyChargeLimit(
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+          @staticmethod
+          def _key(task):
+              cmd = task["cmd"]
+    ++        if cmd == "setChargeRate":
+    ++            vehicle = task.get("vehicle")
+    ++            return (cmd, getattr(vehicle, "VIN", vehicle))
+    +         if cmd == "charge":
+    +             # TWCSlave passes "" when it hasn't read the car's VIN
+    +             return (cmd, task.get("vin") or None)
+     -        if cmd != "setChargeRate":
+    --            # A vehicle-less charge start applies to every car, so a later
+    --            # stop for one car must replace it rather than run alongside it.
+     -            return (cmd, None)
+     -        vehicle = task.get("vehicle")
+     -        return (cmd, getattr(vehicle, "VIN", vehicle))
+    -+        if cmd == "setChargeRate":
+    -+            vehicle = task.get("vehicle")
+    -+            return (cmd, getattr(vehicle, "VIN", vehicle))
+     +        # None is a distinct target meaning "every vehicle".
+     +        return (cmd, task.get("vin"))
+      
+          @staticmethod
+    -     def _is_high_priority(task):
+    +     def _replaces(key, other):
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+              except Exception:
+                  logger.error("Failed to queue vehicle command: %s", traceback.format_exc())
+      
+    +-    def cancel_stop(self, vin=None):
+    +-        # Drop pending stop-charging commands for this car, and any stop for
+    +-        # every car; with no vin, drop every pending stop. A stop already
+    +-        # running can't be cancelled. Not during shutdown, which must send
+    +-        # its stops.
+    +-        vin = vin or None
+     +    def cancel(self, cmd, match):
+     +        # Drop pending (not running) entries for `cmd` whose task satisfies
+     +        # `match`. Returns how many were removed. The running entry is left
+    -+        # alone: it may already be talking to the car.
+    ++        # alone: it may already be talking to the car. Stops are kept during
+    ++        # shutdown, which must send them.
+     +        removed = 0
+    -+        with self._cond:
+    -+            for table in (self._high, self._low):
+    +         with self._cond:
+    +-            if self._draining:
+    +-                return 0
+    +-            keys = [k for k in self._high if vin is None or k[1] is None or k[1] == vin]
+    +-            for k in keys:
+    +-                del self._high[k]
+    +-            if keys:
+    +-                logger.debug("Cancelled %d pending stop command(s)", len(keys))
+    +-            return len(keys)
+    ++            tables = (self._low,) if self._draining else (self._high, self._low)
+    ++            for table in tables:
+     +                doomed = [
+     +                    key
+     +                    for key, (task, _) in table.items()
+    @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+     +        if removed:
+     +            logger.debug("Cancelled %d pending %s command(s)", removed, cmd)
+     +        return removed
+    -+
+    + 
+          def drain_high_priority(self, timeout):
+              with self._cond:
+    -             self._draining = True
+     
+      ## tests/unit/test_twcmaster.py ##
+     @@ tests/unit/test_twcmaster.py: class TestVehicleCommandRouting:
+    @@ tests/unit/test_vehicle_command_queue.py: class TestCallbacksAndErrors:
+              q.put({"cmd": "setChargeRate", "amps": 16, "vehicle": None})
+              wait_idle(q)
+     -        assert module.calls == [("applyChargeLimit", 80), ("setChargeRate", 16, None)]
+    -+        assert module.calls == [("applyChargeLimit", 80, None, False), ("setChargeRate", 16, None)]
+    ++        assert module.calls == [
+    ++            ("applyChargeLimit", 80, None, False),
+    ++            ("setChargeRate", 16, None),
+    ++        ]
+      
+          def test_no_module_gives_false_and_worker_survives(self, module):
+              available = []
+    @@ tests/unit/test_vehicle_command_queue.py: class TestCallbacksAndErrors:
+                  raised.set()
+                  raise SystemExit("module called sys.exit")
+      
+    -@@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+    -         start = time.monotonic()
+    -         assert q.drain_high_priority(timeout=WAIT) is True
+    -         assert time.monotonic() - start < 0.5
+    +@@ tests/unit/test_vehicle_command_queue.py: def unlimited(q, monkeypatch):
+    +     return q
+    + 
+    + 
+    +-class TestPerVehicleCharge:
+    ++def stop_for(vin=None):
+    ++    """The match TWCMaster.cancelStopCarsCharging uses: pending stops for this
+    ++    car and for every car; with no vin, every pending stop."""
+    ++    vin = vin or None
+    ++    return lambda task: not task.get("charge") and (
+    ++        vin is None or task.get("vin") in (vin, None)
+    ++    )
+     +
+     +
+     +class TestKeying:
+    @@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+     +            ("charge", True, "V2"),
+     +        ]
+     +
+    -+    def test_none_vin_is_distinct_from_named_vin(self, q, module):
+    +     def test_charge_commands_for_different_cars_both_run(self, unlimited, module):
+    +         q = unlimited
+    +         block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestPerVehicleCharge:
+    +         module.gate.set()
+    +         wait_idle(q)
+    +         assert module.calls == [
+    +-            ("applyChargeLimit", 80),
+    ++            ("applyChargeLimit", 80, None, False),
+    +             ("charge", False, "V1"),
+    +             ("charge", False, "V2"),
+    +             ("charge", True, "V3"),
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestPerVehicleCharge:
+    +         q.put({"cmd": "charge", "charge": True})
+    +         module.gate.set()
+    +         wait_idle(q)
+    +-        assert module.calls == [("applyChargeLimit", 80), ("charge", True, None)]
+    ++        assert module.calls == [
+    ++            ("applyChargeLimit", 80, None, False),
+    ++            ("charge", True, None),
+    ++        ]
+    ++
+    ++    def test_stop_for_one_car_replaces_a_vehicleless_start(self, unlimited, module):
+    ++        q = unlimited
+     +        block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+     +        q.put({"cmd": "charge", "charge": True})
+    -+        q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    ++        q.put({"cmd": "charge", "charge": True, "vin": "V2"})
+    ++        q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+     +        module.gate.set()
+     +        wait_idle(q)
+    ++        # The start for every car overlapped V1's stop; V2's own start did not.
+     +        assert module.calls == [
+     +            ("applyChargeLimit", 80, None, False),
+    -+            ("charge", True, None),
+    -+            ("charge", True, "V1"),
+    ++            ("charge", False, "V1"),
+    ++            ("charge", True, "V2"),
+    ++        ]
+    + 
+    +     def test_empty_vin_means_every_car(self, unlimited, module):
+    +         q = unlimited
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestPerVehicleCharge:
+    +         q.put({"cmd": "charge", "charge": False, "vin": ""})
+    +         module.gate.set()
+    +         wait_idle(q)
+    +-        assert module.calls == [("applyChargeLimit", 80), ("charge", False, "")]
+    ++        assert module.calls == [
+    ++            ("applyChargeLimit", 80, None, False),
+    ++            ("charge", False, ""),
+     +        ]
+     +
+     +    def test_apply_charge_limit_per_vin_does_not_merge_with_policy_wide(
+    @@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+     +        module.gate.set()
+     +        wait_idle(q)
+     +        assert module.calls == [("setChargeRate", 6, None), ("charge", True, "V3")]
+    -+
+    + 
+     +    def test_cancel_leaves_running_entry_alone(self, q, module):
+     +        block_worker(q, module, {"cmd": "charge", "charge": False, "vin": "V1"})
+     +        assert q.cancel("charge", lambda task: True) == 0
+    @@ tests/unit/test_vehicle_command_queue.py: class TestDrain:
+     +            ("applyChargeLimit", 80, None, False),
+     +            ("setChargeRate", 10, None),
+     +        ]
+    + 
+    +-class TestCancelStop:
+    +     def test_cancels_pending_stop_for_the_car(self, unlimited, module):
+    +         q = unlimited
+    +         block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +-        assert q.cancel_stop("V1") == 1
+    ++        assert q.cancel("charge", stop_for("V1")) == 1
+    +         module.gate.set()
+    +         wait_idle(q)
+    +-        assert module.calls == [("applyChargeLimit", 80), ("charge", False, "V2")]
+    ++        assert module.calls == [
+    ++            ("applyChargeLimit", 80, None, False),
+    ++            ("charge", False, "V2"),
+    ++        ]
+    + 
+    +     def test_cancels_a_stop_for_every_car(self, unlimited, module):
+    +         q = unlimited
+    +         block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": None})
+    +-        assert q.cancel_stop("V1") == 1
+    ++        assert q.cancel("charge", stop_for("V1")) == 1
+    +         module.gate.set()
+    +         wait_idle(q)
+    +-        assert module.calls == [("applyChargeLimit", 80)]
+    ++        assert module.calls == [("applyChargeLimit", 80, None, False)]
+    + 
+    +     @pytest.mark.parametrize("vin", [None, ""])
+    +     def test_without_vin_cancels_every_stop(self, unlimited, module, vin):
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestCancelStop:
+    +         block_worker(q, module, {"cmd": "applyChargeLimit", "limit": 80})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V2"})
+    +-        assert q.cancel_stop(vin) == 2
+    ++        assert q.cancel("charge", stop_for(vin)) == 2
+    +         module.gate.set()
+    +         wait_idle(q)
+    +-        assert module.calls == [("applyChargeLimit", 80)]
+    ++        assert module.calls == [("applyChargeLimit", 80, None, False)]
+    + 
+    +     def test_leaves_starts_and_other_commands(self, unlimited, module):
+    +         q = unlimited
+    +         block_worker(q, module, {"cmd": "setChargeRate", "amps": 6, "vehicle": None})
+    +         q.put({"cmd": "charge", "charge": True, "vin": "V1"})
+    +         q.put({"cmd": "applyChargeLimit", "limit": 80})
+    +-        assert q.cancel_stop("V1") == 0
+    ++        assert q.cancel("charge", stop_for("V1")) == 0
+    +         module.gate.set()
+    +         wait_idle(q)
+    +         assert module.calls == [
+    +             ("setChargeRate", 6, None),
+    +             ("charge", True, "V1"),
+    +-            ("applyChargeLimit", 80),
+    ++            ("applyChargeLimit", 80, None, False),
+    +         ]
+    + 
+    +-    def test_not_during_shutdown(self, unlimited, module):
+    ++    def test_stops_are_not_cancelled_during_shutdown(self, unlimited, module):
+    +         q = unlimited
+    +         block_worker(q, module, {"cmd": "setChargeRate", "amps": 6, "vehicle": None})
+    +         q.put({"cmd": "charge", "charge": False, "vin": "V1"})
+    +@@ tests/unit/test_vehicle_command_queue.py: class TestCancelStop:
+    +         deadline = time.monotonic() + WAIT
+    +         while not q._draining and time.monotonic() < deadline:
+    +             time.sleep(0.005)
+    +-        assert q.cancel_stop("V1") == 0
+    ++        assert q.cancel("charge", stop_for("V1")) == 0
+    +         module.gate.set()
+    +         drainer.join(WAIT)
+    +         assert module.calls == [("setChargeRate", 6, None), ("charge", False, "V1")]
+ 2:  f32c363f !  2:  e6289c5a Add a settings lock taken by off-thread writers
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+     +    * (@MikeBishop) - Serialise settings.json saves under a settings lock so a save no longer races writers on other threads
+          * (@MikeBishop) - Evaluate charging policy on its own thread instead of the RS485 loop, only when acting as master (#670)
+      * Bugfixes
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+    +     * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+     
+      ## lib/TWCManager/Control/HTTPControl.py ##
+     @@ lib/TWCManager/Control/HTTPControl.py: def CreateHTTPHandlerClass(master):
+    @@ tests/unit/test_settings_lock.py (new)
+     +    with patch("builtins.open", opener):
+     +        m.loadSettings()
+     +    assert seen == {"open_locked": False} and m.settings["chargeStopMode"] == "2"
+    +
+    + ## tests/unit/test_teslable_docker.py ##
+    +@@ tests/unit/test_teslable_docker.py: group, so every command needs a group of its own, never TWCManager's.
+    + 
+    + import base64
+    + import os
+    ++import threading
+    + from unittest.mock import Mock, patch
+    + 
+    + import pytest
+    +@@ tests/unit/test_teslable_docker.py: CALL_PATHS = {
+    + @pytest.fixture
+    + def ble(tmp_path):
+    +     master = Mock()
+    ++    master.settingsLock = threading.RLock()
+    +     master.config = {"config": {"teslaControlPath": BINARY}}
+    +     master.settings = {
+    +         "Vehicles": {
+ 3:  3ecfdfcf =  3:  6fdb99f1 Add the vehicle field store
+ 4:  14ee31fd =  4:  8ca0c19f Add the registry Vehicle with VIN or anonymous identity, claims and tiers
+ 5:  5867cfcf =  5:  6ffd53dd Add read sources and a freshness-bounded read cascade that never wakes
+ 6:  00cb287b !  6:  a78e9cfa Add VehicleRegistry with forgetting, persistence and user-asserted vehicles
+    @@ tests/unit/test_registry_membership.py (new)
+     +def test_find_by_name_and_attached():
+     +    r = VehicleRegistry({})
+     +    v = r.getOrCreate(VIN, "TeslaAPI")
+    -+    v.observe("name", "<car>", "TeslaAPI")
+    ++    v.observe("name", "TestCar", "TeslaAPI")
+     +    v.attach("TeslaAPI", "obj")
+    -+    assert r.findByName("<car>") is v and r.findByName("x") is None
+    ++    assert r.findByName("TestCar") is v and r.findByName("x") is None
+     +    assert r.attached("TeslaAPI") == ["obj"] and r.attached("HomeAssistant") == []
+     +
+     +
+ 7:  5376497e =  7:  5b36c349 Confirm TWC-reported VINs and track anonymous plug-session vehicles
+ 8:  2a2232d2 =  8:  fb44567b Persist the vehicle registry in settings.json and forget unseen vehicles hourly
+ 9:  411f83fa !  9:  4902dbc7 Back CarApiVehicle fields with the registry
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+      
+          firstWakeAttemptTime = 0
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+    -     stopTryingToApplyLimit = False
+    -     statusDeferral = 0
+    +     ownerCommandsRetired = False
+    +     refusalLoggedAt = None
+      
+     -    batteryLevel = 10000
+     -    chargeLimit = -1
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+     +        self._bind(carapi.registry.getOrCreate(self.VIN, "TeslaAPI"), listed=True)
+     +        # A cloud account listing is a sighting.
+              self.name = json["display_name"] or self.VIN or str(self.ID) or "unknown"
+    +         self.commandSigning = json.get("command_signing")
+    +         self.ownerCommandsRefused = False
+    +         self.ownerCommandsRetired = False
+      
+     -        # Launch sync monitoring thread
+     -        thread = Thread(target=self.checkSyncNotStale)
+    @@ tests/unit/teslatokens.py: def new_api(master=None, **config_overrides):
+     +    tests that request it need not change."""
+      
+      
+    - def add_home_vehicle(api):
+    + def add_home_vehicle(api, command_signing=None, vin="VIN1", name="Car", id=1):
+     
+      ## tests/unit/test_carapivehicle_registry.py (new) ##
+     @@
+    @@ tests/unit/test_carapivehicle_registry.py (new)
+     +
+     +def test_vehicle_joins_registry_and_claims_teslaapi():
+     +    api, reg = api_with_registry()
+    -+    api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    ++    api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+     +    v = reg.get(VIN)
+     +    assert (
+    -+        v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "<car>"
+    ++        v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "TestCar"
+     +    )
+     +    api.fleetSlot.clear()
+     +    assert v.tier == "observed"  # no command slot: read-only
+    @@ tests/unit/test_carapivehicle_registry.py (new)
+     +
+     +def test_listing_is_a_sighting():
+     +    api, reg = api_with_registry()
+    -+    api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    ++    api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+     +    v = reg.get(VIN)
+     +    assert v.lastSeenSource == "TeslaAPI"
+     +    assert v.latest("name").source == "TeslaAPI"
+    @@ tests/unit/test_carapivehicle_registry.py (new)
+     +            pass
+     +
+     +    api, reg = api_with_registry()
+    -+    api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    ++    api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+     +    car = api.getCarApiVehicles()[0]
+     +    master = api.master
+     +    master.config["vehicle"]["Probe"] = {"enabled": True}
+     +    feed = TeslaMateVehicle(master)
+    -+    feed.applyDataToVehicle("1", "display_name", "<car>")
+    ++    feed.applyDataToVehicle("1", "display_name", "TestCar")
+     +    assert feed.vehicles["1"] is car
+     +    feed.applyDataToVehicle("1", "state", "online")
+     +    feed.applyDataToVehicle("1", "latitude", "1.5")
+10:  94f72377 ! 10:  f54373c4 Read vehicle state through the registry cascade without waking cars
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+          * (@MikeBishop) - Evaluate charging policy on its own thread instead of the RS485 loop, only when acting as master (#670)
+     +    * (@MikeBishop) - One vehicle registry keyed by VIN holds every per-vehicle field with its source and age; reads cascade BLE then cloud and never wake a car unless asked; a TWC-reported VIN is confirmed by a second query before a vehicle is created; vehicles unseen for 30 days (config vehicle.forgetAfterDays) are forgotten
+      * Bugfixes
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+          * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+    +     * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+     
+      ## lib/TWCManager/TWCManager.py ##
+     @@ lib/TWCManager/TWCManager.py: def background_tasks_thread(master):
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              self.syncSkipLoggedAt = {"owner": None, "fleet": None}
+      
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+    -     stopAskingToStartCharging = False
+    -     stopTryingToApplyLimit = False
+    -     statusDeferral = 0
+    +     ownerCommandsRefused = False
+    +     ownerCommandsRetired = False
+    +     refusalLoggedAt = None
+     +    # update_charge reuses a charge reading up to this old (seconds).
+     +    READ_MAX_AGE = 300
+      
+11:  99659f01 ! 11:  fa65c4e1 Attach telemetry to registry vehicles by VIN or name
+    @@ tests/unit/test_carapivehicle_registry.py: def test_relisting_the_api_attaches_t
+     @@ tests/unit/test_carapivehicle_registry.py: def test_legacy_telemetry_feed_drives_a_real_car():  # P7, until Task 11
+          master.config["vehicle"]["Probe"] = {"enabled": True}
+          feed = TeslaMateVehicle(master)
+    -     feed.applyDataToVehicle("1", "display_name", "<car>")
+    +     feed.applyDataToVehicle("1", "display_name", "TestCar")
+     -    assert feed.vehicles["1"] is car
+     +    assert feed.vehicles["1"] is reg.get(VIN)
+          feed.applyDataToVehicle("1", "state", "online")
+    @@ tests/unit/test_telemetry_mapping.py: class Probe(TelmetryBase):
+     -def make(carapi):
+     +def make(load_ok=True):
+     +    registry = VehicleRegistry({})
+    -+    api = FakeCarApi(registry, [(VIN, "<car>")], load_ok)
+    ++    api = FakeCarApi(registry, [(VIN, "TestCar")], load_ok)
+          master = Mock()
+     +    master.vehicleRegistry = registry
+          master.config = {"config": {}, "vehicle": {"Probe": {"enabled": True}}}
+    @@ tests/unit/test_telemetry_mapping.py: class Probe(TelmetryBase):
+     -    veh = FakeVehicle("<car>")
+     -    api = FakeCarApi([veh])
+     -    t = make(api)
+    +-    t.applyDataToVehicle("1", "display_name", "<car>")
+     +    t, api, registry = make()
+    -     t.applyDataToVehicle("1", "display_name", "<car>")
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar")
+          assert api.loads == 0  # no cloud call on the caller's thread
+          assert "1" not in t.vehicles and t.scheduled
+      
+    @@ tests/unit/test_telemetry_mapping.py: class Probe(TelmetryBase):
+     +    t, api, registry = make()
+          t.applyDataToVehicle("1", "charge_limit_soc", "80")  # arrives first
+     -    assert veh.chargeLimit == 0
+    -     t.applyDataToVehicle("1", "display_name", "<car>")
+    +-    t.applyDataToVehicle("1", "display_name", "<car>")
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar")
+     +    assert registry.get(VIN) is None
+          t.retryUnmappedVehicles()
+     -    assert veh.chargeLimit == 80
+    @@ tests/unit/test_telemetry_mapping.py: class Probe(TelmetryBase):
+     -    t = make(api)
+     +    t, api, registry = make(load_ok=False)
+          t.applyDataToVehicle("1", "charge_limit_soc", "75")
+    -     t.applyDataToVehicle("1", "display_name", "<car>")
+    +-    t.applyDataToVehicle("1", "display_name", "<car>")
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar")
+          t.retryUnmappedVehicles()
+    -@@ tests/unit/test_telemetry_mapping.py: def test_unmatched_name_is_remembered_and_retried():
+    +     assert "1" not in t.vehicles  # load failed; still remembered
+      
+          api.load_ok = True  # API comes back
+          t.retryUnmappedVehicles()
+    @@ tests/unit/test_telemetry_registry.py (new)
+     +    assert reg.vehicles() == [] and t.unknownVehicles["1"] == [
+     +        ["charge_limit_soc", "80"]
+     +    ]
+    -+    t.applyDataToVehicle("1", "display_name", "<car>")  # maps and replays at once
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar")  # maps and replays at once
+     +    v = reg.get(VIN)
+    -+    assert v.name == "<car>" and t.vehicles["1"] is v
+    ++    assert v.name == "TestCar" and t.vehicles["1"] is v
+     +    assert (v.latest("chargeLimit").value, v.latest("chargeLimit").source) == (
+     +        80,
+     +        "Probe",
+    @@ tests/unit/test_telemetry_registry.py (new)
+     +
+     +def test_name_match_against_registry_without_cloud_list():
+     +    t, reg = make()
+    -+    reg.getOrCreate(VIN, "TeslaBLE").observe("name", "<car>", "TeslaAPI")
+    -+    assert t.updateVehicles("1", "<car>", loadList=False) is True
+    ++    reg.getOrCreate(VIN, "TeslaBLE").observe("name", "TestCar", "TeslaAPI")
+    ++    assert t.updateVehicles("1", "TestCar", loadList=False) is True
+     +    assert t.vehicles["1"] is reg.get(VIN)
+     +
+     +
+    @@ tests/unit/test_telemetry_registry.py (new)
+     +def test_connection_state_is_the_feed_liveness():
+     +    t, reg = make()
+     +    t.vinFor = lambda vid: VIN
+    -+    t.applyDataToVehicle("1", "display_name", "<car>")
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar")
+     +    v = reg.get(VIN)
+     +    v.observe("chargeLimit", 50, "Probe", at=0.0)
+     +    assert reg.sourceLiveAt("Probe") is None and v.age("chargeLimit") > 1e6
+12:  bc5066bd = 12:  3fc6f5fd Register Home Assistant vehicles, claims and reads in the registry
+13:  bb886cc3 = 13:  111db9a1 Track BLE pairing status per VIN
+14:  1d20fd4f = 14:  38b0be45 Stamp the registry with our own charge-limit and charge-rate writes
+15:  c2881e10 ! 15:  21eef507 Read vehicles from the registry in Policy, TWCSlave and the web UI
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+          * (@MikeBishop) - One vehicle registry keyed by VIN holds every per-vehicle field with its source and age; reads cascade BLE then cloud and never wake a car unless asked; a TWC-reported VIN is confirmed by a second query before a vehicle is created; vehicles unseen for 30 days (config vehicle.forgetAfterDays) are forgotten
+     +    * (@MikeBishop) - The debug API `/api/sendTeslaAPICommand` now takes the vehicle's VIN (`vehicleVIN`) instead of the numeric vehicle ID (`vehicleID`); the web UI and debug dump read vehicles from the registry
+      * Bugfixes
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+          * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+    +     * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+     
+      ## lib/TWCManager/Control/HTTPControl.py ##
+     @@ lib/TWCManager/Control/HTTPControl.py: def CreateHTTPHandlerClass(master):
+    @@ tests/unit/test_registry_callers.py (new)
+     +def _registry():
+     +    reg = VehicleRegistry({})
+     +    v = reg.getOrCreate(VIN, "TeslaAPI")
+    -+    v.observe("name", "<car>", "TeslaAPI")
+    ++    v.observe("name", "TestCar", "TeslaAPI")
+     +    v.observe("lat", 47.5, "TeslaAPI")
+     +    v.observe("lon", -122.25, "TeslaAPI")
+     +    v.attach("TeslaAPI", object())
+    @@ tests/unit/test_registry_callers.py (new)
+     +def test_debug_page_lists_registry_vehicles_by_vin():
+     +    h = _handler(_master(_registry()))
+     +    out = _render_loop(h, "debug.html.j2", '<select id="TeslaAPIVehicle">', "</select>")
+    -+    assert '<option value="%s"><car></option>' % VIN in out
+    ++    assert '<option value="%s">TestCar</option>' % VIN in out
+     +    assert '<option value="5YJ3E1EA1KF000002">5YJ3E1EA1KF000002</option>' in out
+     +    assert "anon:" not in out
+     +    assert "000003" not in out
+    @@ tests/unit/test_registry_callers.py (new)
+     +    h = _handler(_master(_registry()))
+     +    out = _render_loop(h, "settings.html.j2", "L.marker({lon: {{ master", "</form>")
+     +    assert "{lon: -122.25, lat: 47.5}" in out
+    -+    assert "<car> Current Location" in out
+    -+    assert '<option value="-122.25,47.5"><car></option>' in out
+    ++    assert "TestCar Current Location" in out
+    ++    assert '<option value="-122.25,47.5">TestCar</option>' in out
+     +    assert "000002" not in out and "anon:" not in out
+     +    assert "name=learn" in out
+     +
+16:  8082eee9 ! 16:  363184d8 List the vehicle registry on the Vehicles page and add vehicles by VIN
+    @@ tests/unit/test_vehicles_page.py (new)
+     +def master():
+     +    reg = VehicleRegistry({})
+     +    v = reg.getOrCreate(VIN, "TWC")
+    -+    v.observe("name", "<car>", "TeslaAPI")
+    ++    v.observe("name", "TestCar", "TeslaAPI")
+     +    v.claim("TeslaBLE", True, "paired")
+     +    reg.beginPlugSession("8244")
+     +    return SimpleNamespace(
+    @@ tests/unit/test_vehicles_page.py (new)
+     +def test_list_renders_registry_rows():
+     +    m = master()
+     +    html = render(m)
+    -+    assert f"/vehicleDetail/{VIN}" in html and "<car>" in html
+    ++    assert f"/vehicleDetail/{VIN}" in html and "TestCar" in html
+     +    assert "managed" in html
+     +    assert "TeslaBLE (paired)" in html and "90% (holding 80%)" in html
+     +    assert "Unknown car on TWC 8244" in html and "Charge history" in html
+17:  66efc80a = 17:  1c62ea03 Show BLE pairing status and a range scan on the vehicle page
+18:  6dc1356e ! 18:  336e60f9 Only a well-formed VIN becomes a registry vehicle
+    @@ lib/TWCManager/Vehicle/Registry/VehicleRegistry.py: class VehicleRegistry:
+     
+      ## tests/unit/teslatokens.py ##
+     @@ tests/unit/teslatokens.py: def no_threads():
+    - 
+    - 
+    - def add_home_vehicle(api):
+    --    """Add vehicle VIN1, at home and recently contacted, so ready() is True
+    -+    """Add vehicle 5YJ3E1EA1KF000001, at home and recently contacted, so ready() is True
+    -     without an HTTP call. Use with the no_threads fixture."""
+    --    api.addVehicle({"id": 1, "vin": "VIN1", "display_name": "Car"})
+    -+    api.addVehicle({"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"})
+    -     vehicle = api.getCarApiVehicles()[-1]
+    -     vehicle.atHome = True
+    -     vehicle.lastAPIAccessTime = time.time()
+    +     tests that request it need not change."""
+    + 
+    + 
+    +-def add_home_vehicle(api, command_signing=None, vin="VIN1", name="Car", id=1):
+    +-    """Add a vehicle (VIN1 by default), at home and recently contacted, so
+    +-    ready() is True without an HTTP call. command_signing is the /products
+    +-    field; None leaves it out. Use with the no_threads fixture."""
+    ++def add_home_vehicle(
+    ++    api, command_signing=None, vin="5YJ3E1EA1KF000001", name="Car", id=1
+    ++):
+    ++    """Add a vehicle (5YJ3E1EA1KF000001 by default), at home and recently
+    ++    contacted, so ready() is True without an HTTP call. command_signing is the
+    ++    /products field; None leaves it out. Use with the no_threads fixture."""
+    +     entry = {"id": id, "vin": vin, "display_name": name}
+    +     if command_signing is not None:
+    +         entry["command_signing"] = command_signing
+     
+      ## tests/unit/test_carapivehicle_registry.py ##
+     @@ tests/unit/test_carapivehicle_registry.py: def test_actual_current_change_time_only_moves_on_change():
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+                  json={
+                      "count": 1,
+     -                "response": [{"id": 1, "vin": "VIN1", "display_name": "Car"}],
+    -+                "response": [{"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"}],
+    ++                "response": [
+    ++                    {"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"}
+    ++                ],
+                  },
+              )
+              assert api.car_api_available() is True
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestTeslaAPIEVSE:
+      
+          def test_read_only_follows_tesla_api(self, owner_api):
+              evse = self.make_evse(owner_api)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: VCP_403 = {
+    + ACCEPTED = {"response": {"result": True, "reason": ""}}
+    + ONLINE = {"response": {"state": "online"}}
+    + 
+    +-# Each owner-command path: the endpoint under /VIN1 and how to send it.
+    ++# Each owner-command path: the endpoint under /5YJ3E1EA1KF000001 and how to send it.
+    + COMMANDS = {
+    +     "set_charging_amps": (
+    +         "/command/set_charging_amps",
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def no_sleep(monkeypatch):
+    +     monkeypatch.setattr(teslaapi.time, "sleep", lambda secs: None)
+    + 
+    + 
+    +-def add_car(api, command_signing, vin="VIN1", name="Car", id=1):
+    ++def add_car(api, command_signing, vin="5YJ3E1EA1KF000001", name="Car", id=1):
+    +     """A car at home whose charge and location reads succeed without HTTP,
+    +     on a master that tracks charge limits."""
+    +     vehicle = add_home_vehicle(api, command_signing, vin=vin, name=name, id=id)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandsForUnsignedVehicles:
+    +     ):
+    +         api, vehicle = owner_car("off")
+    +         suffix, send = COMMANDS[command]
+    +-        cmd = requests_mock.post(OWNER_URL + "/VIN1" + suffix, json=reply_for(command))
+    ++        cmd = requests_mock.post(
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, json=reply_for(command)
+    ++        )
+    + 
+    +         assert api.readOnly is False
+    +         assert api.readOnlyFor(vehicle) is False
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandsForUnsignedVehicles:
+    +         api, vehicle = owner_car("off")
+    +         api.ownerSlot.pause()
+    +         cmd = requests_mock.post(
+    +-            OWNER_URL + "/VIN1/command/set_charging_amps", json=ACCEPTED
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps", json=ACCEPTED
+    +         )
+    +         assert api.setChargeRate(10, vehicle) == ACCEPTED
+    +         assert cmd.call_count == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestRefusedVehicles:
+    + 
+    + @pytest.fixture
+    + def mixed_fleet(no_threads, no_sleep):
+    +-    """Owner token only; VIN1 takes Owner API commands, VIN2 needs signing."""
+    ++    """Owner token only; 5YJ3E1EA1KF000001 takes Owner API commands, 5YJ3E1EA1KF000002 needs signing."""
+    +     api = new_api()
+    +     api.storeToken(owner_token())
+    +     unsigned = add_car(api, "off")
+    +-    signed = add_car(api, "required", vin="VIN2", name="Signed", id=2)
+    ++    signed = add_car(api, "required", vin="5YJ3E1EA1KF000002", name="Signed", id=2)
+    +     return api, unsigned, signed
+    + 
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         assert amps.call_count == 0
+    +         assert api.setChargeRate(10, unsigned) == ACCEPTED
+    +         assert amps.call_count == 1
+    +-        assert amps.last_request.url.startswith(OWNER_URL + "/VIN1/")
+    ++        assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    +         assert no_error_recorded(api)
+    +         assert signed.lastErrorTime == 0
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         # VehiclePriority tries the next module.
+    +         assert api.car_api_charge({"charge": False}) == "error"
+    +         assert stop.call_count == 1
+    +-        assert stop.last_request.url == OWNER_URL + "/VIN1/command/charge_stop"
+    ++        assert (
+    ++            stop.last_request.url
+    ++            == OWNER_URL + "/5YJ3E1EA1KF000001/command/charge_stop"
+    ++        )
+    +         assert signed.lastErrorTime == 0
+    +         assert no_error_recorded(api)
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +     ):
+    +         api, unsigned, signed = mixed_fleet
+    +         amps = requests_mock.post(
+    +-            OWNER_URL + "/VIN1/command/set_charging_amps", json=ACCEPTED
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps", json=ACCEPTED
+    +         )
+    +         ble = Mock()
+    +         ble.setChargeRate = Mock(return_value=True)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    + 
+    + 
+    + # Each owner-command path as VehiclePriority calls it: the endpoint under
+    +-# /VIN1 and how to call it.
+    ++# /5YJ3E1EA1KF000001 and how to call it.
+    + PRIORITY_CALLS = {
+    +     "setChargeRate": (
+    +         "/command/set_charging_amps",
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         api, vehicle = owner_car("off")
+    +         suffix, send = COMMANDS[command]
+    +         first, after = REFUSED_RETURNS[command]
+    +-        cmd = requests_mock.post(OWNER_URL + "/VIN1" + suffix, **ALL_REFUSALS[refusal])
+    ++        cmd = requests_mock.post(
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, **ALL_REFUSALS[refusal]
+    ++        )
+    + 
+    +         assert send(api, vehicle) == first
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    + 
+    +         # Reads still run on the Owner token.
+    +         assert api.ownerSlot.usable("read")
+    +-        data = requests_mock.get(OWNER_URL + "/VIN1/vehicle_data", json=VEHICLE_DATA)
+    ++        data = requests_mock.get(
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/vehicle_data", json=VEHICLE_DATA
+    ++        )
+    +         assert vehicle.update_vehicle_data() is True
+    +         assert data.call_count == 1
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car("off")
+    +         requests_mock.post(
+    +-            OWNER_URL + "/VIN1/command/set_charging_amps", **ALL_REFUSALS[refusal]
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    ++            **ALL_REFUSALS[refusal]
+    +         )
+    +         api.setChargeRate(10, vehicle)
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         api, vehicle = owner_car("off")
+    +         vehicle.lastAPIAccessTime = 0  # not known to be awake
+    +         vehicle.firstChargeNeededTime = 1  # pre-wake hold long over
+    +-        requests_mock.get(OWNER_URL + "/VIN1", json={"response": {"state": "asleep"}})
+    ++        requests_mock.get(
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001", json={"response": {"state": "asleep"}}
+    ++        )
+    +         wake = requests_mock.post(
+    +-            OWNER_URL + "/VIN1/wake_up", status_code=403, json=VCP_403
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/wake_up", status_code=403, json=VCP_403
+    +         )
+    + 
+    +         api.car_api_available(charge=True)
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +     ):
+    +         api, vehicle = owner_car("off")
+    +         suffix, call = PRIORITY_CALLS[method]
+    +-        cmd = requests_mock.post(OWNER_URL + "/VIN1" + suffix, **ALL_REFUSALS[refusal])
+    ++        cmd = requests_mock.post(
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, **ALL_REFUSALS[refusal]
+    ++        )
+    +         ble = Mock()
+    +         setattr(ble, method, Mock(return_value=True))
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         assert getattr(ble, method).call_count == 2
+    +         assert no_error_recorded(api)
+    + 
+    +-        data = requests_mock.get(OWNER_URL + "/VIN1/vehicle_data", json=VEHICLE_DATA)
+    ++        data = requests_mock.get(
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/vehicle_data", json=VEHICLE_DATA
+    ++        )
+    +         assert vehicle.update_vehicle_data() is True
+    +         assert data.call_count == 1
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         api, vehicle = owner_car("off", fleet=fleet_token())
+    +         suffix, send = COMMANDS[command]
+    +         answer = self.FLEET_REFUSALS[refusal]
+    +-        cmd = requests_mock.post(FLEET_URL + "/VIN1" + suffix, **answer)
+    ++        cmd = requests_mock.post(FLEET_URL + "/5YJ3E1EA1KF000001" + suffix, **answer)
+    + 
+    +         assert send(api, vehicle) == self.FLEET_RETURNS[command](answer["json"])
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestBothTokens:
+    +         api.setChargeRate(10, vehicle)
+    + 
+    +         assert amps.call_count == 1
+    +-        assert amps.last_request.url.startswith(FLEET_URL + "/VIN1/")
+    ++        assert amps.last_request.url.startswith(FLEET_URL + "/5YJ3E1EA1KF000001/")
+    +         bearer = amps.last_request.headers["Authorization"]
+    +         assert bearer == "Bearer " + api.fleetSlot.accessToken
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestBothTokens:
+    + 
+    +         assert api.commandSlotFor(vehicle) is api.ownerSlot
+    +         api.setChargeRate(10, vehicle)
+    +-        assert amps.last_request.url.startswith(OWNER_URL + "/VIN1/")
+    ++        assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    + 
+    +     def test_fleet_carries_commands_for_signed_car(self, owner_car):
+    +         api, vehicle = owner_car("required", fleet=fleet_token())
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclesNotYetListed:
+    +                 "response": [
+    +                     {
+    +                         "id": 1,
+    +-                        "vin": "VIN1",
+    ++                        "vin": "5YJ3E1EA1KF000001",
+    +                         "display_name": "Car",
+    +                         "command_signing": "required",
+    +                     }
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car("off")
+    +         requests_mock.post(
+    +-            OWNER_URL + "/VIN1/command/set_charging_amps",
+    ++            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    +             status_code=403,
+    +             json=VCP_403,
+    +         )
+     
+      ## tests/unit/test_teslaapi_token_classification.py ##
+     @@ tests/unit/test_teslaapi_token_classification.py: class TestSwitching:
+19:  45c21341 = 19:  47f0c45a Forget a vehicle added by VIN that nothing else knows

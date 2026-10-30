@@ -1,0 +1,6 @@
+# Task X5: import style and comment pass (audit Tier B + Tier C, ≈ −205)
+Source of truth: /home/mbishop/github/TWCManager/.claude/worktrees/ble-threading-twcmanager-62cb96/.superpowers/sdd/2026-10-18-vehicle-model-phase5-presence/audit-report.md, sections **Tier B** and **Tier C**. Purely mechanical:
+- Tier B: in lib/TWCManager/Vehicle/Reconcile and Vehicle/Providers (and other modules the audit names), replace black-exploded `from x import (a, b, c, ...)` with module imports (`from ..Providers import Capability as C`, `from . import Outcome as O`) matching the style the tests already use; update call sites. No other edits.
+- Tier C: shorten the listed headers/docstrings to the "why" only, per the table; keep every statement that explains why the code is what it is; delete restatements of the code.
+Base: branch vehicle-model/phase5 in the wt-vm5 worktree. No behaviour change: tests/unit + tests/EMS stay green; tests/unit/test_command_path_parity.py counts and timings untouched. Comment rule applies (why, not history; no phase/PR/ruling IDs). Report the lib delta (git diff --shortstat <BASE> -- lib, net) against the estimate; if you can't reach the estimate, say which item fell short and why.
+Two commits: "Import vehicle-model modules by name" and "Trim comments that restate the code".

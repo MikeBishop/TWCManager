@@ -130,9 +130,8 @@ The 1.4.0 rework generalises that: one vehicle model, providers that read and ac
   - **Re-assert**: our attempt didn't land (failed, or the read predates our write). Try again per the fallback rules.
   - **Adopt**: a **vehicle read newer than our last write** confirms a different value (limit 80% set in the app; car reports Charging after we stopped it). That's the user's change (below).
   - **Hands off**: the divergence is unexplained or car-internal. Example: preconditioning draws current through the TWC while we hold the car stopped and the TWC offers its minimum; the car is not "Charging". Neither re-command nor adopt; leave it alone until a vehicle read says otherwise. TWC-observed current alone is never grounds to adopt "charging".
-- **User changes are adopted, not undone.** How it's adopted depends on how often the aspect's desired value changes:
-  - **Slow aspects** (charge limit; charging on/off as set by policy): the user's value replaces desired until the **next real decision**: a policy transition, unplug or plug-in. A hand-set limit also becomes the new outside value (today's rule).
-  - **Fast aspects** (amps under Track Green Energy, distributor start/stop): desired changes constantly, so "until the next decision" would mean "immediately overwritten". Instead the user's change becomes a **bound for the plug session**: a car whose amps the user lowered to 16 A is treated as max 16 A by the distributor; a car the user started while we held it stopped is treated as wanting charge. Bounds clear on unplug.
+- **A hand-set charge limit is adopted, not undone** (amended 2026-10-17, user): the user's limit replaces desired until the **next real decision** (a policy transition, unplug or plug-in), and becomes the new outside value (today's rule, as on `main`).
+- **Charging on/off and amps are never adopted** (amended 2026-10-17, user; matches `main`). A change made in the car or app to either is overwritten by the next decision. The earlier design's plug-session bounds for fast aspects (amps under Track Green Energy, distributor start/stop) are dropped.
 - **One shared charge-limit rule** in the reconciler: don't wake a car to lower its limit (#698); wake for raises and restores per current rules.
 - This **replaces**:
   - `VehiclePriority`;
@@ -166,12 +165,14 @@ The 1.4.0 rework generalises that: one vehicle model, providers that read and ac
 | Policy | own interval (30 s default), feeds the control tick (budget, policy limit) | — |
 | Lanes | BLE lane (serial), cloud lane(s); one attempt at a time per lane; report outcomes | decide fallback |
 
-- **Everyone moves to the new cycle**, pure-Gen2 installs included: today's per-slave allocation inside `TWCSlave.send_master_heartbeat` (fair share by cars charging, flex, dampening, 6 A spike workaround, 60 s start/stop gates, re-stopping a car drawing ≥ 4 A below the minimum) moves into the one distributor on the control tick. Minimise distinct code paths; the legacy path is retired, not kept beside the new one. Its behaviours become distributor rules with tests.
+- **Everyone moves to the new cycle**, pure-Gen2 installs included: today's per-slave allocation inside `TWCSlave.send_master_heartbeat` (fair share by cars charging, flex, dampening, 60 s start/stop gates, re-stopping a car drawing ≥ 4 A below the minimum) moves into the one distributor on the control tick. Minimise distinct code paths; the legacy path is retired, not kept beside the new one. Its behaviours become distributor rules with tests. The 6 A spike workaround is **dropped**, not ported (amended 2026-10-17, user: the firmware behaviour it works around is known only from code comments and is likely long fixed; it can return as a feature if needed). The Phase 4 PR must call this decision out for the maintainer.
 - Up to one tick (~1 s) of lag on Gen2 targets is acceptable (user: policy interval is 30 s; 60 s was "a bit slow").
 - Token refresh moves off the serial loop; per-slot refresh lock (#690).
 - `settings` gets a lock or a single writer.
 
 ### Vehicles tab
+
+> **User, 2026-10-18:** scope reduced. Built: the list (providers, last seen, held limit, presence), Add by VIN, narrow Forget, and per car the **pending commands**: what is in flight and/or why it is not being sent. The merged field view and per-provider panels below are dropped.
 
 - **List**: each car's tier, claiming providers and their status, last seen and source, presence, held/outside limits, attempt in flight / backing off. Action: **Forget**.
 - **Per-car page** (already reachable; BLE pairing lives there, and its "Status: Not Implemented" is replaced):

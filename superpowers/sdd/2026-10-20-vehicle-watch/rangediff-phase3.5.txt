@@ -1,0 +1,3370 @@
+ 1:  d254b3ff =  1:  2221962b Pin the held-limit migration's edge cases
+ 2:  f3103e6c =  2:  782aca90 Answer sync state from the registry vehicle
+ 3:  3a224467 !  3:  a6bfedba Make Forget atomic with a listing
+    @@ tests/unit/test_homeassistant_registry.py: def test_failed_registration_does_not
+     
+      ## tests/unit/test_registry_membership.py ##
+     @@ tests/unit/test_registry_membership.py: def test_find_by_name_and_attached():
+    -     v.observe("name", "<car>", "TeslaAPI")
+    +     v.observe("name", "TestCar", "TeslaAPI")
+          v.attach("TeslaAPI", "obj")
+    -     assert r.findByName("<car>") is v and r.findByName("x") is None
+    +     assert r.findByName("TestCar") is v and r.findByName("x") is None
+     -    assert r.attached("TeslaAPI") == ["obj"] and r.attached("HomeAssistant") == []
+     +    assert r.attached("TeslaAPI") == [(v, "obj")] and r.attached("HomeAssistant") == []
+      
+ 4:  1359c2be !  4:  86a43497 Dissolve CarApiVehicle into TeslaAPI and an attached record
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(P
+     +            and self.carapi.update_vehicle_data(vehicle, slot=slot)
+     +        )
+      
+    - 
+    - class OwnerAPIProvider(_TeslaAPIProvider):
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+    +     def ampsRange(self, vehicle) -> Optional[Tuple[float, float]]:
+    +         if vehicle is None:
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+          # The clock passed to the wake hold; a test may replace it
+          clock = time.time
+      
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_T
+      
+          def setChargeLimit(self, vin: str, limit: int) -> Outcome:
+              return self._command(vin, "set_charge_limit", {"percent": int(limit)})
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+              return outcome
+      
+          def stopCharging(self, vin: str) -> Outcome:
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_T
+     +        vehicle = self._listed(vin)
+              if (
+     -            car is not None
+    -+            vehicle is not None
+    -             and self.carapi.slotFor("command") is not None
+    +-            and self.carapi.slotFor("command") is not None
+     -            and not car.is_awake(now=self.clock())
+     -            and car.lastVehicleAwakeKnown
+    ++            vehicle is not None
+    ++            and self.carapi.commandSlotFor(vehicle) is not None
+     +            and self.carapi.onlineState(vehicle, now=self.clock()) is False
+              ):
+                  # As main: an asleep car is not charging; settled, never sent (N2)
+                  return Outcome(SATISFIED, "asleep, not charging")
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+              return outcome
+      
+          def wake(self, vin: str) -> Outcome:
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_T
+     -        return self.carapi.wakeOutcome(car, now=self.clock())
+     +        return self.carapi.wakeOutcome(vehicle, now=self.clock())
+      
+    -     def wallConnectorVins(self) -> Optional[Dict[str, str]]:
+    -         return self.carapi.wallConnectorVins(self.carapi.fleetSlot)
+    + 
+    + class OwnerAPIProvider(_TeslaAPIProvider):
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(_TeslaAPIProvider):
+    +         if capability in COMMANDS:
+    +             # Says once why a car is read-only, as the module would have
+    +             return self.available(capability) and not self.carapi.refuseCommandFor(
+    +-                car, TESLA_COMMAND[capability]
+    ++                vehicle, TESLA_COMMAND[capability]
+    +             )
+    +         return self.carapi.ownerSlot.usable("read")
+    + 
+     
+      ## lib/TWCManager/Vehicle/Reconcile/Reconciler.py ##
+     @@ lib/TWCManager/Vehicle/Reconcile/Reconciler.py: import time
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: logger = LoggerFactory.get_logger("TeslaAPI"
+     +    delayNextWakeAttempt = 0
+     +    online = None  # the free online check: True, False, None (no answer)
+     +    onlineCheckedAt = 0  # ... reused for 120 s from here
+    ++    # command_signing from Tesla's vehicle list: Owner API commands go only
+    ++    # to cars where it is "off". ownerCommandsRefused is set when Tesla
+    ++    # refuses one anyway; ownerCommandsRetired too when the refusal says the
+    ++    # Owner API no longer takes commands (410/412, "only available on
+    ++    # fleetapi") rather than that the car needs signing. refusalLoggedAt is
+    ++    # TeslaAPI.refusalState when the car's read-only line was last logged.
+    ++    commandSigning = None
+    ++    ownerCommandsRefused = False
+    ++    ownerCommandsRetired = False
+    ++    refusalLoggedAt = None
+      
+      
+      class TLS13Adapter(HTTPAdapter):
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +            # The registry refuses a missing or malformed VIN.
+     +            logger.debug("Skipping a listed vehicle without a usable VIN")
+     +            return
+    -+        # The Owner API never commands; the Fleet claim follows the Fleet
+    -+        # slot live, so a token pasted or synced after the listing manages
+    -+        # the car without a re-list
+    -+        vehicle.claim("OwnerAPI", False, "listed")
+    ++        car = vehicle.attachment("TeslaAPI")
+    ++        car.commandSigning = json.get("command_signing")
+    ++        car.ownerCommandsRefused = False
+    ++        car.ownerCommandsRetired = False
+    ++        # The Owner claim follows this car's command_signing and the Fleet
+    ++        # claim the Fleet slot, live, so a token pasted or synced after the
+    ++        # listing manages the car without a re-list
+    ++        vehicle.claim("OwnerAPI", lambda: self.ownerCommandsAllowed(vehicle), "listed")
+     +        vehicle.claim("FleetAPI", lambda: self.fleetSlot.usable("command"), "listed")
+     +        # A cloud account listing is a sighting.
+     +        vehicle.observe("name", json["display_name"] or vehicle.vin, "TeslaAPI")
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -        vehicle=None,
+     +        car=None,
+              tries=3,
+    ++        vehicle=None,
+          ):
+              # One request with slot's token to path under the API root (where
+    +         # .../api/1/vehicles lives), bounded by timeout. Returns (response,
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -                 "Car API %s %s: HTTP %s" % (method, path, req.status_code),
+    -             )
+    +                 # no error backoff, so the next provider sends at once
+    +                 return req, Outcome(REFUSED, "owner refused")
+                  outcome = self._classify(
+     -                slot, req.status_code, purpose, req.text, vehicle, tries > 0
+     +                slot, req.status_code, purpose, req.text, car, tries > 0
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+      
+          def tokenRoute(self, token):
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -         return self.slotFor("command") is None
+    +         # pause does not count: it is for reads only.
+    +         return not self.ownerSlot.empty() and self.ownerSlot.tokenType == "owner"
+    + 
+    ++    @staticmethod
+    ++    def _carOf(vehicle):
+    ++        # The listed car's CarApiState, from its registry Vehicle (or itself)
+    ++        if hasattr(vehicle, "attachment"):
+    ++            return vehicle.attachment("TeslaAPI")
+    ++        return vehicle
+    ++
+    +     def ownerCommandsAllowed(self, vehicle):
+    +         # True when an Owner API token may command this car: Tesla listed it
+    +         # with command_signing exactly "off" and has not since refused an
+    +         # Owner API command for it. "required", a missing field and any
+    +         # other value are read-only (fail closed).
+    ++        car = self._carOf(vehicle)
+    +         return (
+    +-            self.ownerTokenHeld()
+    +-            and getattr(vehicle, "commandSigning", None) == "off"
+    +-            and not getattr(vehicle, "ownerCommandsRefused", False)
+    ++            car is not None
+    ++            and self.ownerTokenHeld()
+    ++            and car.commandSigning == "off"
+    ++            and not car.ownerCommandsRefused
+    +         )
+    + 
+    +     def commandSlotFor(self, vehicle):
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +     def readOnly(self):
+    +         # True when no listed car can be sent commands. With an Owner token
+    +         # and no cars listed yet it is False: whether the token can command
+    +-        # is only known once they are listed, and only a command (or
+    ++        # is only known once they are listed, and only a read (or
+    +         # telemetry) lists them. Commands still check each car.
+    +         if self.fleetSlot.usable("command"):
+    +             return False
+    +-        vehicles = self.carApiVehicles
+    +-        if not vehicles:
+    ++        listed = self.registry.attached("TeslaAPI")
+    ++        if not listed:
+    +             return not self.ownerTokenHeld()
+    +-        return not any(self.ownerCommandsAllowed(v) for v in vehicles)
+    ++        return not any(self.ownerCommandsAllowed(car) for _, car in listed)
+    + 
+    +     @property
+    +     def ownerTokenOnly(self):
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         return not self.fleetSlot.usable("command") and self.ownerTokenHeld()
+      
+          def loadVehicleList(self):
+     -        # Populate carApiVehicles from the vehicle list of the read slot
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              return True
+      
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         if not self.readOnly:
+    +             return False
+    +         if self.ownerTokenHeld():
+    +-            for vehicle in self.carApiVehicles:
+    ++            for vehicle, _ in self.registry.attached("TeslaAPI"):
+    +                 self.refuseCommandFor(vehicle, command)
+    +         elif self.fleetSlot.changes != self.refusalLoggedAt:
+    +             logger.info(
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +             self.refusalLoggedAt = self.fleetSlot.changes
+    +         return True
+    + 
+    +-    def refusalState(self, vehicle):
+    ++    def refusalState(self, car):
+    +         # What a car's refusal log line depends on; it is logged again only
+    +         # when this changes. Not the owner slot's changes: a resync of the
+    +         # same Owner token is not news.
+    +-        return (
+    +-            self.fleetSlot.changes,
+    +-            vehicle.commandSigning,
+    +-            vehicle.ownerCommandsRefused,
+    +-        )
+    ++        return (self.fleetSlot.changes, car.commandSigning, car.ownerCommandsRefused)
+      
+    +     def refuseCommandFor(self, vehicle, command):
+    +         # True when no slot can send this car commands. Like
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +             # No token can command any car: the module-wide line.
+    +             self.refuseCommandIfReadOnly(command)
+    +             return True
+    +-        state = self.refusalState(vehicle)
+    +-        if vehicle.refusalLoggedAt == state:
+    ++        car = self._carOf(vehicle)
+    ++        if car is None:
+    ++            return True
+    ++        state = self.refusalState(car)
+    ++        if car.refusalLoggedAt == state:
+    +             return True
+    +-        vehicle.refusalLoggedAt = state
+    +-        signing = vehicle.commandSigning
+    +-        if vehicle.ownerCommandsRetired:
+    ++        car.refusalLoggedAt = state
+    ++        signing = car.commandSigning
+    ++        if car.ownerCommandsRetired:
+    +             why = "Tesla's Owner API no longer takes commands for it."
+    +-        elif vehicle.ownerCommandsRefused:
+    ++        elif car.ownerCommandsRefused:
+    +             why = (
+    +                 "Tesla refused an Owner API command for it although it "
+    +                 "reported command_signing: off."
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         # restarts, and logs that once. Records no API error, which would
+    +         # also back off reads; the caller returns its failure, so the next
+    +         # provider is tried.
+    +-        if req is None:
+    ++        car = self._carOf(vehicle)
+    ++        if req is None or car is None:
+    +             return False
+    +         text = str(getattr(req, "text", "") or "")
+    +         try:
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +             retired = False
+    +         else:
+    +             return False
+    +-        vehicle.ownerCommandsRefused = True
+    +-        vehicle.ownerCommandsRetired = retired
+    +-        vehicle.refusalLoggedAt = self.refusalState(vehicle)
+    ++        car.ownerCommandsRefused = True
+    ++        car.ownerCommandsRetired = retired
+    ++        car.refusalLoggedAt = self.refusalState(car)
+    +         answer = " (HTTP " + str(req.status_code) + (": " + error if error else "")
+    +         if retired:
+    +             logger.warning(
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          def command(self, vehicle, name: str, body: Optional[dict] = None) -> Outcome:
+    -         # One Fleet API command (name, e.g. "set_charge_limit") to vehicle
+    +         # One Tesla API command (name, e.g. "set_charge_limit") to vehicle,
+    +         # through the slot that may command this car (commandSlotFor)
+     +        car = vehicle.attachment("TeslaAPI")
+    -         slot = self.slotFor("command")
+    +         slot = self.commandSlotFor(vehicle)
+              if slot is None:
+    +             # Says once why this car is read-only
+    +             self.refuseCommandFor(vehicle, name)
+                  return Outcome(REFUSED, "no command token")
+     -        if self.getCarApiRetryRemaining(vehicle, now=self.now()):
+     +        if self.getCarApiRetryRemaining(car, now=self.now()):
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +            "vehicles/%s/%s" % (vehicle.vin, path),
+                  purpose,
+                  body,
+    --            vehicle=vehicle,
+     +            car=vehicle.attachment("TeslaAPI"),
+    +             vehicle=vehicle,
+              )
+              if outcome is not None:
+    -             return outcome, None
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                  return Outcome(ERROR, type(e).__name__), None
+              return None, response
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              # and wakeDue allows it. One wake_up at most.
+              now = self.now() if now is None else now
+     +        car = vehicle.attachment("TeslaAPI")
+    -         slot = self.slotFor("command")
+    +         slot = self.commandSlotFor(vehicle)
+              if slot is None:
+    +             self.refuseCommandFor(vehicle, "wake_up")
+                  return Outcome(REFUSED, "no command token")
+     -        if self.getCarApiRetryRemaining(vehicle, now=now):
+     +        if self.getCarApiRetryRemaining(car, now=now):
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +        if awake is None:
+                  # No free answer (no read token, an error): never wake blind
+                  return Outcome(UNREACHABLE, "online check failed")
+    -         if not slot.usable("wake"):
+    +         if slot is self.fleetSlot and not slot.usable("wake"):
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -             # the token changes. Checked after the free online check, so an
+    -             # online car still gets its command
+    +             # online car still gets its command. An Owner refusal is noted
+    +             # per car instead
+                  return Outcome(UNREACHABLE, "wake refused")
+     -        if vehicle.firstChargeNeededTime == 0:
+     -            vehicle.firstChargeNeededTime = now
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -    debuglevel = 0
+     -    ID = None
+     -    VIN = ""
+    --
+    ++    # One listed car's reads: vehicle is its registry Vehicle, car its
+    ++    # CarApiState. Field reads and writes go through the registry.
+    + 
+     -    firstWakeAttemptTime = 0
+     -    firstChargeNeededTime = 0
+     -    lastAPIAccessTime = 0
+     -    delayNextWakeAttempt = 0
+    -+    # One listed car's reads: vehicle is its registry Vehicle, car its
+    -+    # CarApiState. Field reads and writes go through the registry.
+    - 
+    +-
+     -    errorCount = 0
+     -    lastErrorTime = 0
+     -    lastVehicleAwakeTime = 0
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -    # When a wake was last asked for (TeslaAPI's charge-need lifetime)
+     -    lastChargeNeededTime = 0
+     -    statusDeferral = 0
+    +-    # command_signing from Tesla's vehicle list: Owner API commands go only
+    +-    # to cars where it is "off". ownerCommandsRefused is set when Tesla
+    +-    # refuses one anyway; ownerCommandsRetired too when the refusal says the
+    +-    # Owner API no longer takes commands (410/412, "only available on
+    +-    # fleetapi") rather than that the car needs signing. refusalLoggedAt is
+    +-    # TeslaAPI.refusalState when the car's read-only line was last logged.
+    +-    commandSigning = None
+    +-    ownerCommandsRefused = False
+    +-    ownerCommandsRetired = False
+    +-    refusalLoggedAt = None
+     -    # update_charge reuses a charge reading up to this old (seconds).
+     -    READ_MAX_AGE = 300
+     -
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     -        self._bind(carapi.registry.getOrCreate(self.VIN, "TeslaAPI"), listed=True)
+     -        # A cloud account listing is a sighting.
+     -        self.name = json["display_name"] or self.VIN or str(self.ID) or "unknown"
+    +-        self.commandSigning = json.get("command_signing")
+    +-        self.ownerCommandsRefused = False
+    +-        self.ownerCommandsRetired = False
+     -
+     -    def _bind(self, vehicle, listed=False):
+    --        # Joins the registry vehicle with both claims. The Owner API never
+    --        # commands; the Fleet claim follows the Fleet slot live, so a token
+    --        # pasted or synced after the listing manages the car without a
+    --        # re-list. A listing attaches this object; a rebind (after a forget)
+    +-        # Joins the registry vehicle with both claims. The Owner claim
+    +-        # follows this car's command_signing and the Fleet claim the Fleet
+    +-        # slot, live, so a token pasted or synced after the listing manages
+    +-        # the car without a re-list. A listing attaches this object; a rebind (after a forget)
+     -        # only takes an empty attachment, so a stale object never displaces a
+     -        # newer one.
+     -        if vehicle is not self._vehicle:
+     -            if listed or vehicle.attachment("TeslaAPI") is None:
+     -                vehicle.attach("TeslaAPI", self)
+     -            carapi = self.carapi
+    --            vehicle.claim("OwnerAPI", False, "listed")
+    +-            vehicle.claim(
+    +-                "OwnerAPI", lambda: carapi.ownerCommandsAllowed(self), "listed"
+    +-            )
+     -            vehicle.claim(
+     -                "FleetAPI", lambda: carapi.fleetSlot.usable("command"), "listed"
+     -            )
+    @@ tests/unit/teslatokens.py: class FakeMaster:
+     +    request it need not change."""
+      
+      
+    - def add_home_vehicle(api):
+    --    """Add vehicle 5YJ3E1EA1KF000001, at home and recently contacted, so ready() is True
+    --    without an HTTP call. Use with the no_threads fixture."""
+    -+    """Add vehicle 5YJ3E1EA1KF000001, at home and recently contacted, so _ready
+    -+    is True without an HTTP call; returns its registry vehicle. Use with the
+    -+    no_threads fixture."""
+    -     api.addVehicle({"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"})
+    + def add_home_vehicle(
+    +     api, command_signing=None, vin="5YJ3E1EA1KF000001", name="Car", id=1
+    + ):
+    +     """Add a vehicle (5YJ3E1EA1KF000001 by default), at home and recently
+    +-    contacted, so ready() is True without an HTTP call. command_signing is the
+    +-    /products field; None leaves it out. Use with the no_threads fixture."""
+    ++    contacted, so _ready is True without an HTTP call; returns its registry
+    ++    vehicle. command_signing is the /products field; None leaves it out. Use
+    ++    with the no_threads fixture."""
+    +     entry = {"id": id, "vin": vin, "display_name": name}
+    +     if command_signing is not None:
+    +         entry["command_signing"] = command_signing
+    +     api.addVehicle(entry)
+     -    vehicle = api.carApiVehicles[-1]
+     -    vehicle.atHome = True
+     -    vehicle.lastAPIAccessTime = time.time()
+    -+    vehicle = api.registry.get("5YJ3E1EA1KF000001")
+    ++    vehicle = api.registry.get(vin)
+     +    car = vehicle.attachment("TeslaAPI")
+     +    car.atHome = True
+     +    car.lastAPIAccessTime = time.time()
+    @@ tests/unit/test_limit_wiring.py: def restarted(requests_mock, position=HOME, hel
+     -    api = new_api(master=m); api.storeToken(owner_token()); api.storeToken(fleet_token()); del m.modules["TeslaAPI"]   # not a module record
+     +    api = new_api(master=m); api.storeToken(owner_token()); api.storeToken(fleet_token())
+          for p in api.providers(): m.providerOrder.register(p)
+    -     api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    +     api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+          if claim: v.claim("TeslaBLE", True, "paired")
+     @@ tests/unit/test_limit_wiring.py: def restarted(requests_mock, position=HOME, held=True, claim=True):
+          for field, value in (("chargeLimit", 50), ("chargingState", "Complete"), ("batteryLevel", 51)): v.observe(field, value, "TeslaMateVehicle")
+    @@ tests/unit/test_teslaapi_providers.py: def test_claims_are_live_and_follow_the_s
+     +    api.wakeOutcome.assert_called_once_with(v, now=1000.0)
+          assert fleet.setAmps("5YJ3E1EA1KF000009", 10) == O.Outcome(O.UNSUPPORTED, "not listed")
+          assert fleet.wake("5YJ3E1EA1KF000009") == O.Outcome(O.UNSUPPORTED, "not listed")
+    -     assert owner.setAmps(VIN, 10).kind == O.UNSUPPORTED    # Owner declares no commands
+    +     assert owner.setAmps(VIN, 10) == O.Outcome(O.DONE)    # the Owner provider shares the command path
+     @@ tests/unit/test_teslaapi_providers.py: def test_fleet_commands_resolve_the_car_by_vin():
+      def test_each_provider_reads_through_its_own_slot(which):
+          api, reg = api_with_registry()
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+     -        from tests.unit.test_carapivehicle_registry import api_with_registry
+     +        from tests.unit.test_teslaapi_registry import api_with_registry
+              from TWCManager.TWCMaster import TWCMaster
+    -         from TWCManager.Vehicle.Providers import Capability as C
+              from TWCManager.Vehicle.Providers.Order import ProviderOrder
+    +         from TWCManager.Vehicle.Providers.Provider import Provider
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def tesla_provider(api):
+    +     return api.providers()[0]
+    + 
+    + 
+    ++def car(vehicle):
+    ++    """TeslaAPI's own record for a listed registry vehicle."""
+    ++    return vehicle.attachment("TeslaAPI")
+    ++
+    ++
+    + # Each owner-command path: the endpoint under /5YJ3E1EA1KF000001 and how to send it.
+    + COMMANDS = {
+    +     "set_charging_amps": (
+    +         "/command/set_charging_amps",
+    +-        lambda api, vehicle: tesla_provider(api).setAmps(vehicle.VIN, 10),
+    ++        lambda api, vehicle: tesla_provider(api).setAmps(vehicle.vin, 10),
+    +     ),
+    +     "set_charge_limit": (
+    +         "/command/set_charge_limit",
+    +-        lambda api, vehicle: tesla_provider(api).setChargeLimit(vehicle.VIN, 80),
+    ++        lambda api, vehicle: tesla_provider(api).setChargeLimit(vehicle.vin, 80),
+    +     ),
+    +     "charge_start": (
+    +         "/command/charge_start",
+    +-        lambda api, vehicle: tesla_provider(api).startCharging(vehicle.VIN),
+    ++        lambda api, vehicle: tesla_provider(api).startCharging(vehicle.vin),
+    +     ),
+    +     "charge_stop": (
+    +         "/command/charge_stop",
+    +-        lambda api, vehicle: tesla_provider(api).stopCharging(vehicle.VIN),
+    ++        lambda api, vehicle: tesla_provider(api).stopCharging(vehicle.vin),
+    +     ),
+    +     "wake_up": (
+    +         "/wake_up",
+    +-        lambda api, vehicle: tesla_provider(api).wake(vehicle.VIN),
+    ++        lambda api, vehicle: tesla_provider(api).wake(vehicle.vin),
+    +     ),
+    + }
+    + 
+    + 
+    + def prime(command, api, vehicle, requests_mock, state="asleep"):
+    +     """A wake first asks the free online state and goes out only for a car
+    +-    not known to be online whose charge need is live and past its grace."""
+    ++    not known to be online whose charge need is live and past its grace; a
+    ++    stop asks it too and goes out to an online car."""
+    ++    if command == "charge_stop":
+    ++        for base in (OWNER_URL, FLEET_URL):
+    ++            requests_mock.get(base + "/" + vehicle.vin, json=ONLINE)
+    ++        return
+    +     if command != "wake_up":
+    +         return
+    +-    vehicle.lastAPIAccessTime = 0
+    +-    vehicle.firstChargeNeededTime = 1
+    +-    vehicle.lastChargeNeededTime = time.time()
+    ++    car(vehicle).lastAPIAccessTime = 0
+    ++    car(vehicle).firstChargeNeededTime = 1
+    ++    car(vehicle).lastChargeNeededTime = time.time()
+    +     for base in (OWNER_URL, FLEET_URL):
+    +-        requests_mock.get(base + "/" + vehicle.VIN, json={"response": {"state": state}})
+    ++        requests_mock.get(base + "/" + vehicle.vin, json={"response": {"state": state}})
+    + 
+    + 
+    + class Refusal:
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def no_sleep(monkeypatch):
+    + 
+    + 
+    + def add_car(api, command_signing, vin="5YJ3E1EA1KF000001", name="Car", id=1):
+    +-    """A car at home whose charge and location reads succeed without HTTP,
+    +-    on a master that tracks charge limits."""
+    +-    vehicle = add_home_vehicle(api, command_signing, vin=vin, name=name, id=id)
+    +-    vehicle.update_charge = lambda *args, **kwargs: True
+    +-    vehicle.update_location = lambda *args, **kwargs: True
+    +-    api.master.getNormalChargeLimit = lambda vehicleID: (True, 70, -1)
+    +-    api.master.saveNormalChargeLimit = lambda *args: None
+    +-    api.master.removeNormalChargeLimit = lambda *args: None
+    +-    return vehicle
+    ++    """A listed car at home, as its registry vehicle."""
+    ++    return add_home_vehicle(api, command_signing, vin=vin, name=name, id=id)
+    + 
+    + 
+    + @pytest.fixture
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def order_over(api):
+    + 
+    + def amps_candidates(api, vehicle):
+    +     """Who may set this car's amps, in order."""
+    +-    return [p.name for p in order_over(api).candidates(vehicle.vehicle, C.SET_AMPS)]
+    ++    return [p.name for p in order_over(api).candidates(vehicle, C.SET_AMPS)]
+    + 
+    + 
+    + class TestOwnerCommandsForUnsignedVehicles:
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandsForUnsignedVehicles:
+    +         cmd = requests_mock.post(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps", json=ACCEPTED
+    +         )
+    +-        assert tesla_provider(api).setAmps(vehicle.VIN, 10) == Outcome(DONE)
+    ++        assert tesla_provider(api).setAmps(vehicle.vin, 10) == Outcome(DONE)
+    +         assert cmd.call_count == 1
+    + 
+    +     def test_cleared_owner_slot_blocks(self, owner_car, any_http):
+    +         api, vehicle = owner_car("off")
+    +         api.ownerSlot.clear()
+    +         assert api.readOnlyFor(vehicle) is True
+    +-        assert tesla_provider(api).setAmps(vehicle.VIN, 10) == REFUSED_OUTCOME
+    ++        assert tesla_provider(api).setAmps(vehicle.vin, 10) == REFUSED_OUTCOME
+    +         assert any_http.call_count == 0
+    + 
+    + 
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         assert api.readOnly is False
+    +         assert api.readOnlyFor(unsigned) is False
+    +         assert api.readOnlyFor(signed) is True
+    +-        assert provider.setAmps(signed.VIN, 10) == REFUSED_OUTCOME
+    ++        assert provider.setAmps(signed.vin, 10) == REFUSED_OUTCOME
+    +         assert amps.call_count == 0
+    +-        assert provider.setAmps(unsigned.VIN, 10) == Outcome(DONE)
+    ++        assert provider.setAmps(unsigned.vin, 10) == Outcome(DONE)
+    +         assert amps.call_count == 1
+    +         assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    +         assert no_error_recorded(api)
+    +-        assert signed.lastErrorTime == 0
+    ++        assert car(signed).lastErrorTime == 0
+    + 
+    +     def test_stop_reaches_only_the_unsigned_car(self, mixed_fleet, requests_mock):
+    +         api, unsigned, signed = mixed_fleet
+    ++        requests_mock.get(re.compile(r".*/vehicles/5YJ3E1EA1KF00000[12]$"), json=ONLINE)
+    +         stop = requests_mock.post(re.compile(r".*/command/charge_stop"), json=ACCEPTED)
+    +         provider = tesla_provider(api)
+    + 
+    +         # The signed car is refused without a request, so the reconciler
+    +         # tries the next provider for it.
+    +-        assert provider.stopCharging(signed.VIN) == REFUSED_OUTCOME
+    ++        assert provider.stopCharging(signed.vin) == REFUSED_OUTCOME
+    +         assert stop.call_count == 0
+    +-        assert provider.stopCharging(unsigned.VIN) == Outcome(DONE)
+    ++        assert provider.stopCharging(unsigned.vin) == Outcome(DONE)
+    +         assert stop.call_count == 1
+    +         assert (
+    +             stop.last_request.url
+    +             == OWNER_URL + "/5YJ3E1EA1KF000001/command/charge_stop"
+    +         )
+    +-        assert signed.lastErrorTime == 0
+    ++        assert car(signed).lastErrorTime == 0
+    +         assert no_error_recorded(api)
+    + 
+    +     def test_order_leaves_out_tesla_api_for_the_signed_car(self, mixed_fleet, any_http):
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         assert amps_candidates(api, signed) == ["Fallback"]
+    +         assert any_http.call_count == 0
+    +         assert no_error_recorded(api)
+    +-        assert signed.lastErrorTime == 0
+    ++        assert car(signed).lastErrorTime == 0
+    + 
+    +     def test_order_puts_owner_api_first_for_the_unsigned_car(self, mixed_fleet):
+    +         api, unsigned, signed = mixed_fleet
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         order = ProviderOrder(api.master)
+    +         for p in api.providers():
+    +             order.register(p)
+    +-        assert VehicleEndpoint(unsigned.vehicle, order, api.master).isReadOnly is False
+    +-        assert VehicleEndpoint(signed.vehicle, order, api.master).isReadOnly is True
+    ++        assert VehicleEndpoint(unsigned, order, api.master).isReadOnly is False
+    ++        assert VehicleEndpoint(signed, order, api.master).isReadOnly is True
+    + 
+    + 
+    + class TestOwnerCommandRefusedByTesla:
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         assert send(api, vehicle) == first
+    + 
+    +         assert cmd.call_count == 1
+    +-        assert vehicle.ownerCommandsRefused is True
+    ++        assert car(vehicle).ownerCommandsRefused is True
+    +         assert no_error_recorded(api)
+    +         assert api.readOnlyFor(vehicle) is True
+    +         assert api.readOnly is True
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         # Reads still run on the Owner token (of a car known awake: a read
+    +         # of an asleep car is never attempted).
+    +         assert api.ownerSlot.usable("read")
+    +-        vehicle.lastAPIAccessTime = time.time()
+    +-        vehicle.firstWakeAttemptTime = 0
+    ++        car(vehicle).lastAPIAccessTime = time.time()
+    ++        car(vehicle).firstWakeAttemptTime = 0
+    +         data = requests_mock.get(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/vehicle_data", json=VEHICLE_DATA
+    +         )
+    +-        assert vehicle.update_vehicle_data() is True
+    ++        assert api.update_vehicle_data(vehicle) is True
+    +         assert data.call_count == 1
+    + 
+    +     @pytest.mark.parametrize(
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    +             **ALL_REFUSALS[refusal]
+    +         )
+    +-        tesla_provider(api).setAmps(vehicle.VIN, 10)
+    ++        tesla_provider(api).setAmps(vehicle.vin, 10)
+    + 
+    +         warnings = [
+    +             r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    + 
+    +         # The per-car read-only line, logged again on a state change, gives
+    +         # the same cause.
+    +-        vehicle.refusalLoggedAt = None
+    +-        tesla_provider(api).setAmps(vehicle.VIN, 12)
+    ++        car(vehicle).refusalLoggedAt = None
+    ++        tesla_provider(api).setAmps(vehicle.vin, 12)
+    +         lines = [
+    +             r.getMessage()
+    +             for r in caplog.records
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    + 
+    +     def test_wake_from_the_reconciler_records_no_error(self, owner_car, requests_mock):
+    +         api, vehicle = owner_car("off")
+    +-        vehicle.lastAPIAccessTime = 0  # not known to be awake
+    ++        car(vehicle).lastAPIAccessTime = 0  # not known to be awake
+    +         # A live charge need whose pre-wake hold is long over
+    +-        vehicle.firstChargeNeededTime = 1
+    +-        vehicle.lastChargeNeededTime = time.time()
+    ++        car(vehicle).firstChargeNeededTime = 1
+    ++        car(vehicle).lastChargeNeededTime = time.time()
+    +         requests_mock.get(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001", json={"response": {"state": "asleep"}}
+    +         )
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/wake_up", status_code=403, json=VCP_403
+    +         )
+    + 
+    +-        assert tesla_provider(api).wake(vehicle.VIN) == REFUSED_OUTCOME
+    ++        assert tesla_provider(api).wake(vehicle.vin) == REFUSED_OUTCOME
+    + 
+    +         assert wake.call_count == 1
+    +-        assert vehicle.ownerCommandsRefused is True
+    ++        assert car(vehicle).ownerCommandsRefused is True
+    +         assert no_error_recorded(api)
+    + 
+    +     @pytest.mark.parametrize("refusal", list(ALL_REFUSALS))
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         )
+    +         assert amps_candidates(api, vehicle) == ["OwnerAPI", "Fallback"]
+    + 
+    +-        assert tesla_provider(api).setAmps(vehicle.VIN, 10) == REFUSED_OUTCOME
+    ++        assert tesla_provider(api).setAmps(vehicle.vin, 10) == REFUSED_OUTCOME
+    +         assert cmd.call_count == 1
+    + 
+    +         # Latched: the next walk leaves TeslaAPI out without an HTTP call.
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         data = requests_mock.get(
+    +             OWNER_URL + "/5YJ3E1EA1KF000001/vehicle_data", json=VEHICLE_DATA
+    +         )
+    +-        assert vehicle.update_vehicle_data() is True
+    ++        assert api.update_vehicle_data(vehicle) is True
+    +         assert data.call_count == 1
+    + 
+    +     # Fleet API answers to a command keep today's handling: Tesla is
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +         assert send(api, vehicle) == self.FLEET_REFUSED
+    + 
+    +         assert cmd.call_count >= 1
+    +-        assert vehicle.ownerCommandsRefused is False
+    ++        assert car(vehicle).ownerCommandsRefused is False
+    +         # The reconciler path retires a Fleet token Tesla refused (403, 412);
+    +         # the Owner token then carries this car's commands
+    +         if api.fleetSlot.usable("command"):
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestBothTokens:
+    +         )
+    + 
+    +         assert api.commandSlotFor(vehicle) is api.fleetSlot
+    +-        tesla_provider(api).setAmps(vehicle.VIN, 10)
+    ++        tesla_provider(api).setAmps(vehicle.vin, 10)
+    + 
+    +         assert amps.call_count == 1
+    +         assert amps.last_request.url.startswith(FLEET_URL + "/5YJ3E1EA1KF000001/")
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestBothTokens:
+    +         )
+    + 
+    +         assert api.commandSlotFor(vehicle) is api.ownerSlot
+    +-        tesla_provider(api).setAmps(vehicle.VIN, 10)
+    ++        tesla_provider(api).setAmps(vehicle.vin, 10)
+    +         assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    + 
+    +     def test_fleet_carries_commands_for_signed_car(self, owner_car):
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car("required")
+    +         provider = tesla_provider(api)
+    +-        provider.setAmps(vehicle.VIN, 10)
+    +-        provider.setAmps(vehicle.VIN, 12)
+    +-        provider.wake(vehicle.VIN)
+    +-        provider.startCharging(vehicle.VIN)
+    ++        provider.setAmps(vehicle.vin, 10)
+    ++        provider.setAmps(vehicle.vin, 12)
+    ++        provider.wake(vehicle.vin)
+    ++        provider.startCharging(vehicle.vin)
+    + 
+    +         lines = self.lines(caplog, "command_signing")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +         caplog.set_level(logging.INFO)
+    +         api, vehicle = owner_car(signing)
+    +         provider = tesla_provider(api)
+    +-        provider.setAmps(vehicle.VIN, 10)
+    +-        provider.setAmps(vehicle.VIN, 12)
+    ++        provider.setAmps(vehicle.vin, 10)
+    ++        provider.setAmps(vehicle.vin, 12)
+    + 
+    +         lines = self.lines(caplog, "command_signing")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +         api, unsigned, signed = mixed_fleet
+    +         requests_mock.post(re.compile(r".*/command/set_charging_amps"), json=ACCEPTED)
+    +         provider = tesla_provider(api)
+    +-        provider.setAmps(signed.VIN, 10)
+    +-        provider.setAmps(unsigned.VIN, 10)
+    +-        provider.setAmps(signed.VIN, 12)
+    ++        provider.setAmps(signed.vin, 10)
+    ++        provider.setAmps(unsigned.vin, 10)
+    ++        provider.setAmps(signed.vin, 12)
+    + 
+    +         lines = self.lines(caplog, "command_signing")
+    +         assert len(lines) == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestPerVehicleRefusalLogging:
+    +             json=VCP_403,
+    +         )
+    +         provider = tesla_provider(api)
+    +-        provider.setAmps(vehicle.VIN, 10)
+    +-        provider.setAmps(vehicle.VIN, 12)
+    +-        provider.wake(vehicle.VIN)
+    ++        provider.setAmps(vehicle.vin, 10)
+    ++        provider.setAmps(vehicle.vin, 12)
+    ++        provider.wake(vehicle.vin)
+    + 
+    +         lines = self.lines(caplog, "Car")
+    +         assert len(lines) == 1
+     
+      ## tests/unit/test_carapivehicle_registry.py => tests/unit/test_teslaapi_registry.py ##
+     @@
+    @@ tests/unit/test_teslaapi_registry.py: def api_with_registry():
+      
+     @@ tests/unit/test_teslaapi_registry.py: def test_vehicle_joins_registry_and_claims_teslaapi():
+          api, reg = api_with_registry()
+    -     api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    +     api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+          v = reg.get(VIN)
+     -    assert (
+    --        v.attachment("TeslaAPI") is api.carApiVehicles[0] and v.name == "<car>"
+    +-        v.attachment("TeslaAPI") is api.carApiVehicles[0] and v.name == "TestCar"
+     -    )
+     +    assert reg.attached("TeslaAPI") == [(v, v.attachment("TeslaAPI"))]
+    -+    assert v.name == "<car>"
+    ++    assert v.name == "TestCar"
+          api.fleetSlot.clear()
+          assert v.tier == "observed"  # no command slot: read-only
+          api.fleetSlot.setTokens(fleet_token())
+    @@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_only
+          assert (phases.value, phases.source, phases.at) == (3, "TeslaBLE", 5.0)
+          assert reg.get(VIN).latest("chargeLimit") is None  # no default observed
+          assert reg.get(VIN).latest("gpsAsOf") is None
+    -@@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_only_present_keys():  # P15
+    - def test_update_vehicle_data_observes_the_cars_own_current_request():   # slim Task 12b
+    +     assert reg.get(VIN).latest("name") == name_before  # not re-observed
+    + 
+    + 
+    +-def test_update_vehicle_data_observes_the_cars_own_current_request():   # slim Task 12b
+    ++def test_update_vehicle_data_observes_the_cars_own_current_request():  # slim Task 12b
+          api, reg = api_with_registry()
+          api.addVehicle({"id": 1, "vin": VIN, "display_name": "C"})
+     -    car = api.carApiVehicles[0]
+    @@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_only
+              return_value=(
+                  True,
+                  {
+    -@@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_the_cars_own_current_request():   # slim T
+    +                 "drive_state": {"latitude": 1.0, "longitude": 2.0},
+    +-                "charge_state": {"charge_current_request": 16, "charger_pilot_current": 32},
+    ++                "charge_state": {
+    ++                    "charge_current_request": 16,
+    ++                    "charger_pilot_current": 32,
+    ++                },
+    +                 "vehicle_state": {},
+                  },
+              )
+          )
+    @@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_the_
+     +    assert api.update_vehicle_data(reg.get(VIN)) is True
+          obs = reg.get(VIN).latest("chargeCurrentRequest")
+          assert (obs.value, obs.source) == (16, "TeslaAPI")
+    -     assert reg.get(VIN).value("availableCurrent") == 32   # the pilot stays the pilot
+    +-    assert reg.get(VIN).value("availableCurrent") == 32   # the pilot stays the pilot
+    ++    assert reg.get(VIN).value("availableCurrent") == 32  # the pilot stays the pilot
+    + 
+    + 
+    + def test_debug_interface_resolves_by_vin():
+     @@ tests/unit/test_teslaapi_registry.py: def test_debug_interface_resolves_by_vin():
+          master.reconciler = inline(VehicleReconciler(master))
+          # True: a one-shot attempt was submitted (inline here, so it has run)
+    @@ tests/unit/test_teslaapi_registry.py: def test_debug_interface_resolves_by_vin()
+     @@ tests/unit/test_teslaapi_registry.py: def test_telemetry_feed_drives_a_real_car():
+      
+          api, reg = api_with_registry()
+    -     api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    +     api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+     -    car = api.carApiVehicles[0]
+          master = api.master
+          master.config["vehicle"]["Probe"] = {"enabled": True}
+          feed = TeslaMateVehicle(master)
+     @@ tests/unit/test_teslaapi_registry.py: def test_telemetry_feed_drives_a_real_car():
+    +     obs = reg.get(VIN).latest("state")
+          assert (obs.value, obs.source) == ("online", "TeslaMateVehicle")
+          assert reg.get(VIN).latest("lat").source == "TeslaMateVehicle"
+    -     assert reg.get(VIN).syncSource == "TeslaMateVehicle" and reg.get(VIN).value("pluggedIn") is True
+    +-    assert reg.get(VIN).syncSource == "TeslaMateVehicle" and reg.get(VIN).value("pluggedIn") is True
+     -    assert car.lat == 1.5
+    ++    assert (
+    ++        reg.get(VIN).syncSource == "TeslaMateVehicle"
+    ++        and reg.get(VIN).value("pluggedIn") is True
+    ++    )
+     +    assert reg.get(VIN).value("lat", 10000) == 1.5
+      
+      
+    @@ tests/unit/test_teslaapi_registry.py: def test_two_concurrent_reads_pay_one_vehi
+     +    from TWCManager.Vehicle.TeslaAPI import CarApiState
+     +
+     +    api, reg = api_with_registry()
+    -+    api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    ++    api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+     +    v = reg.get(VIN)
+     +    state = v.attachment("TeslaAPI")
+     +    assert type(state) is CarApiState
+    @@ tests/unit/test_teslaapi_registry.py: def test_two_concurrent_reads_pay_one_vehi
+     +    assert fleet.commands is False  # no Fleet token yet
+     +    api.storeToken(fleet_token())
+     +    assert fleet.commands is True  # follows the slot
+    -+    assert v.latest("name").source == "TeslaAPI" and v.name == "<car>"
+    ++    assert v.latest("name").source == "TeslaAPI" and v.name == "TestCar"
+     +    assert reg.attached("TeslaAPI") == [(v, state)]
+     +
+     +
+ 5:  40cf2d1d !  5:  815ac1f2 Let the Owner API command cars listed with command_signing off
+    @@ Commit message
+         Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+     
+      ## CHANGELOG.md ##
+    -@@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+    -     * (@MikeBishop) - Gen3 Wall Connectors each get their own target; several units on one bus share the headroom. TWCManager names the car on a Gen3 with a free read of the energy site's live status. This needs the Gen3 registered in the Tesla app and a token that can read energy data (a Fleet API token with the `energy_device_data` scope); a unit's optional `din` key fixes a wrong DIN guess
+    -     * (@MikeBishop) - `controller.Gen2TWCs.ranges` sets a per-TWC `minAmps` (in place of minAmpsPerTWC) and `maxAmps`
+    - * Architecture
+    --    * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used read-only
+    -+    * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used for reads, and for commands only to vehicles Tesla reports with `command_signing: off`
+    -     * (@MikeBishop) - Saved Tesla tokens migrate to separate Owner and Fleet settings on first start; downgrading afterwards loses the Owner API token (#692)
+    -     * (@MikeBishop) - Held charge limits in settings `chargeLimits` are keyed by VIN; entries keyed by the Tesla API's numeric vehicle ID are re-keyed when the vehicle list names them. After a downgrade, only 1.3.x's TeslaBLE path reads the VIN-keyed entries; its Tesla API path, keyed by numeric ID, starts over
+    -     * (@MikeBishop) - TWC abstraction layer with EVSEController/EVSEInstance interface (ported from #483)
+     @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+          * (@MikeBishop) - Fix: A rejected pasted refresh token keeps the previous tokens, and a 401 on refresh clears the token type (#687)
+          * (@MikeBishop) - Fix: Check for a car coming online after a Fleet API wake_up instead of waking it again 30 minutes later (#699)
+          * (@MikeBishop) - Fix: Stale TeslaMate asleep state no longer stops the free vehicle state check (#699)
+    +-    * (@MikeBishop) - Fix: Allow Owner API commands per vehicle when Tesla reports `command_signing: off`; other vehicles stay read-only (#659)
+     +    * (@MikeBishop) - Fix: Allow Owner API commands per vehicle when Tesla reports `command_signing: off`; other vehicles stay read-only. They sit just ahead of the Fleet API in the command order, so with both tokens such a vehicle's commands go to the free Owner API, and to the Fleet API once Tesla refuses them (#659)
+    - 
+    - ## v1.3.4 - 2026-04-24
+    - * Features
+    -
+    - ## docs/README.md ##
+    -@@ docs/README.md: In an upcoming release, this will be offered as a switchable option to replace t
+    -       
+    -       * Use the Tesla API to connect to the car, sending a command to stop/start charging.
+    - 
+    --This requires a Tesla API token, which is stored locally within a settings file. Tesla retired the legacy Owner API, so cloud control now requires a registered FleetAPI app (see the [Tesla FleetAPI setup guide](modules/Vehicle_TeslaAPI.md)), TeslaMate token sync, or pasting a token into the Settings page. Local BLE control (TeslaBLE) is also available and needs no cloud token.
+    -+This requires a Tesla API token, which is stored locally within a settings file. Tesla retired the legacy Owner API login, so cloud control now requires a registered FleetAPI app (see the [Tesla FleetAPI setup guide](modules/Vehicle_TeslaAPI.md)), TeslaMate token sync, or pasting a token into the Settings page. An Owner API token commands only vehicles Tesla reports with `command_signing: off`, and reads the others (see [Owner API tokens](modules/Vehicle_TeslaAPI.md#owner-api-tokens)). Local BLE control (TeslaBLE) is also available and needs no cloud token.
+    - 
+    - If you have multiple cars, TWCManager will attempt to identify which cars are home using geofencing. The following page of the TMC forums thread explains it better than I could: https://teslamotorsclub.com/tmc/threads/new-wall-connector-load-sharing-protocol.72830/page-16
+    - 
+    +     * (@MikeBishop) - Fix: Run tesla-control in the host network namespace under Docker, and a BLE command timeout no longer kills TWCManager (#711)
+    +     * Fix: Cancel a pending stop-charging command when charging should continue (closes #667)
+    +     * Fix: Queue charge start/stop commands per vehicle and send at most one per vehicle per minute, so a refused stop is no longer retried every loop
+     
+      ## docs/Settings.md ##
+     @@ docs/Settings.md: This setting specifies that any vehicle which requests to start charging will be
+    @@ docs/Settings.md: This setting specifies that any vehicle which requests to star
+         * `ble_only` - Local only - never send billed cloud commands. Every non-local provider (the Fleet API and Home Assistant) is suppressed for commands; cloud reads still run.
+     
+      ## docs/modules/Vehicle_TeslaAPI.md ##
+    -@@ docs/modules/Vehicle_TeslaAPI.md: geofencing, and to issue charge commands.
+    - > login + tokens give you data and authentication; the proxy or BLE give you control.
+    - > See [Driving charging](#driving-charging-proxy-or-ble) below.
+    - 
+    --Tesla retired the legacy Owner API, so cloud access now requires you to register
+    --your own application with Tesla and complete an OAuth login. If you would rather not
+    -+Tesla retired the legacy Owner API login, so cloud access now generally requires you
+    -+to register your own application with Tesla and complete an OAuth login. An Owner API
+    -+token from another tool (such as TeslaMate) still reads vehicle state, and commands
+    -+only some vehicles; see [Owner API tokens](#owner-api-tokens). If you would rather not
+    - register an application at all, TeslaBLE controls charging locally over Bluetooth and
+    - needs no Tesla account.
+    - 
+    -@@ docs/modules/Vehicle_TeslaAPI.md: Without one of these, charge commands fail with
+    - stops retrying (it will still read state via the FleetAPI). FleetAPI data + (proxy or
+    - BLE) control is the intended, complete configuration.
+    - 
+    -+## Owner API tokens
+    -+
+    -+An Owner API token (pasted, or synced from [TeslaMate](Vehicle_TeslaMate.md)) reads
+    -+vehicle state through the Owner API. Whether it can also send charge commands depends
+    -+on the vehicle. Tesla's vehicle list (`/api/1/products`) reports a `command_signing`
+    -+value for each vehicle:
+    -+
+    -+- `"off"`: Tesla accepts Owner API commands for that vehicle, so TWCManager sends
+    -+  charge commands (start/stop, charge limit, charge rate, wake) for it with the Owner
+    -+  API token.
+    -+- `"required"`: the vehicle needs signed commands, and Owner API commands return
+    -+  `403 "Tesla Vehicle Command Protocol required"`. TWCManager treats it as read-only
+    -+  and logs once that its charge commands need a Fleet API token with the Vehicle
+    -+  Command proxy (`teslaProxy`) or the TeslaBLE module.
+    -+- Missing, or any other value: treated as read-only.
+    -+
+    -+TWCManager decides this per vehicle, so one account can have a vehicle it commands and
+    +@@ docs/modules/Vehicle_TeslaAPI.md: value for each vehicle:
+    + - Missing, or any other value: treated as read-only.
+    + 
+    + TWCManager decides this per vehicle, so one account can have a vehicle it commands and
+    +-a vehicle it only reads. For a read-only vehicle, TeslaAPI sends no command and records
+    +-no API error, and the next vehicle module (such as TeslaBLE) is tried.
+    +-
+    +-If Tesla still refuses an Owner API command for a vehicle that reported `"off"`,
+    +-TWCManager treats that vehicle as read-only until it restarts and logs a warning
+    +-naming the cause:
+    +-
+    +-- HTTP 403, or a response naming the Vehicle Command Protocol: the vehicle needs
+    +-  signed commands after all.
+    +-- HTTP 410 or 412, or a response saying the endpoint is "only available on
+    +-  fleetapi": the Owner API no longer takes commands for it.
+    +-
+    +-Either way, reads continue, no API error is recorded (so there is no error backoff),
+    +-and the command falls through to the next vehicle module.
+    +-
+    +-When you also hold a Fleet API token that can send commands, commands go through the
+    +-Fleet API (and the proxy, if set) for every vehicle, as before. The Owner API token
+    +-carries commands only when no Fleet API token can.
+     +a vehicle it only reads. A read-only vehicle gets no command from the Owner API and no
+     +API error is recorded; the next provider in the command order (such as TeslaBLE or
+     +Home Assistant) carries its commands.
+    @@ docs/modules/Vehicle_TeslaAPI.md: Without one of these, charge commands fail wit
+     +(either case above), the Fleet API (and the proxy, if set) sends them, at once. Every
+     +other vehicle gets its commands through the Fleet API, as before, and is not logged as
+     +read-only.
+    -+
+    -+Not yet confirmed:
+    -+
+    -+- Whether `"off"` always means a pre-2021 Model S or X. It has been seen on a 2018
+    -+  Model X.
+    -+- Whether Tesla returns other `command_signing` values, or changes a vehicle's value
+    -+  over time. TWCManager reads the vehicle list once, so it sees a change only after a
+    -+  restart.
+    -+- Whether charge start and stop behave like the charge limit and charge rate commands
+    -+  on `"off"` vehicles. Only the latter two (and wake) have been tried.
+    -+- Whether the Fleet API vehicle list includes `command_signing`. When the vehicles are
+    -+  listed through the Fleet API, a missing value leaves them read-only for Owner API
+    -+  commands.
+    -+
+    - ## Alternatives to the web login
+      
+    - - Manual token entry: the Settings page has a manual API token override if you already
+    -
+    - ## lib/TWCManager/Control/themes/Default/handle_teslalogin.html.j2 ##
+    -@@
+    -     <b>Success, your Tesla API tokens have been stored.</b>
+    -   </font>
+    -   {% set carapi = master.getModuleByName("TeslaAPI") %}
+    --  {% if carapi and carapi.readOnly %}
+    --  <p>This is a read-only Owner API token: TWCManager can read your vehicle
+    --     state, but Tesla does not accept vehicle commands with it, and the
+    -+  {% if carapi and carapi.ownerTokenOnly %}
+    -+  <p>This is an Owner API token: TWCManager can read your vehicle state with
+    -+     it. Tesla accepts vehicle commands with it only for vehicles it reports
+    -+     as not needing signed commands (<code>command_signing</code> "off");
+    -+     TWCManager checks each vehicle and treats the rest as read-only. The
+    -      Vehicle Command proxy only takes Fleet API tokens. To <b>drive
+    --     charging</b> (start/stop/rate-limit), use the TeslaBLE module, which
+    --     sends commands to the car over Bluetooth. See the
+    -+     charging</b> (start/stop/rate-limit) on the other vehicles, use the
+    -+     TeslaBLE module, which sends commands to the car over Bluetooth. See the
+    -      <a href="https://github.com/ngardiner/TWCManager/blob/main/docs/modules/Vehicle_TeslaBLE.md" target="_blank">TeslaBLE</a> docs.</p>
+    -   {% else %}
+    -   <p>TWCManager can now read your vehicle state. To <b>drive charging</b>
+    -
+    - ## lib/TWCManager/Control/themes/Default/request_teslalogin.html.j2 ##
+    -@@
+    -       <tr>
+    -         <td></td>
+    -         <td>Already have a Tesla API token? Paste a bare access or refresh
+    --            token here instead (for example a read-only Owner API token from
+    -+            token here instead (for example an Owner API token from
+    -             another tool). A refresh token replaces the stored tokens only
+    -             if Tesla accepts it.</td>
+    -       </tr>
+    + Not yet confirmed:
+    + 
+     
+      ## lib/TWCManager/EVSEInstance/VehicleEndpoint.py ##
+     @@ lib/TWCManager/EVSEInstance/VehicleEndpoint.py: class VehicleEndpoint(EVSEInstance):
+    @@ lib/TWCManager/Vehicle/Providers/Capability.py: CLOUD_FREE = Cost(TIER_CLOUD_FRE
+      FLEET_COMMAND = Cost(TIER_BILLED, 0.001)
+      FLEET_DATA = Cost(TIER_BILLED, 0.002)
+      FLEET_WAKE = Cost(TIER_BILLED, 0.02)
+    +-# An Owner API command or wake costs nothing, but stands in for Fleet and
+    +-# Tesla rate-limits it: paced as the billed tier is
+     +# An Owner API command or wake (#659) costs nothing, but stands in for Fleet
+     +# and Tesla rate-limits it: paced as the billed tier is
+    -+OWNER_COMMAND = Cost(TIER_BILLED, 0.0)
+    + OWNER_COMMAND = Cost(TIER_BILLED, 0.0)
+      HA_BILLED = Cost(TIER_BILLED, None)
+      DISRUPTIVE = Cost(TIER_DISRUPTIVE, 0.0)
+    - 
+     
+      ## lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py ##
+     @@
+      # The TeslaAPI module's two token slots as two providers. The Owner API reads
+    --# for free and never commands. The Fleet API bills each vehicle_data, command
+    --# and wake, so it reads only when the Owner slot cannot (slotFor("read")), and
+    --# it alone commands and wakes. Neither does I/O to answer ready or available.
+    + # for free, and commands and wakes only a car Tesla lists with
+    +-# command_signing "off", while no Fleet token commands. The Fleet API bills
+    +-# each vehicle_data, command and wake, so it reads only when the Owner slot
+    +-# cannot (slotFor("read")). Neither does I/O to answer ready or available.
+     -# Both read the energy site's Wall Connector VINs for free, Owner first.
+    -+# for free, and commands and wakes only a car Tesla lists with
+     +# command_signing "off" (#659), and ranks first (canCommand). The Fleet API
+     +# bills each vehicle_data, command and wake, so it reads only when the Owner
+     +# slot cannot (slotFor("read")). Neither does I/O to answer ready or
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py
+      from typing import Dict, Optional, Tuple
+      
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Capability import (
+    +     FLEET_COMMAND,
+          FLEET_DATA,
+          FLEET_WAKE,
+    +-    OWNER_COMMAND,
+          LOCATION_FIELDS,
+     +    OWNER_COMMAND,
+          READ_CHARGE,
+    @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Capability import (
+      )
+      from .Provider import CLOUD_SUPPRESSED, Provider, vehicleMaxAmps
+      
+    -+# The Tesla command each capability sends, for the read-only line
+    -+TESLA_COMMAND = {
+    -+    SET_CHARGE_LIMIT: "set_charge_limit",
+    -+    START_CHARGING: "charge_start",
+    -+    STOP_CHARGING: "charge_stop",
+    -+    SET_AMPS: "set_charging_amps",
+    -+    WAKE: "wake_up",
+    -+}
+    +-# The reader paces it: a connect edge, then one poll a minute
+    +-WALL_CONNECTOR_VINS = Declaration(CLOUD_FREE)
+    +-
+    + # The Tesla command each capability sends, for the read-only line
+    + TESLA_COMMAND = {
+    +     SET_CHARGE_LIMIT: "set_charge_limit",
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: TESLA_COMMAND = {
+    +     WAKE: "wake_up",
+    + }
+    + 
+    ++# The reader paces it: a connect edge, then one poll a minute
+    ++WALL_CONNECTOR_VINS = Declaration(CLOUD_FREE)
+     +
+    - # The reader paces it: a connect edge, then one poll a minute
+    - WALL_CONNECTOR_VINS = Declaration(CLOUD_FREE)
+      
+    + class _TeslaAPIProvider(Provider):
+    +     # One token slot of the TeslaAPI module
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+    -             and self.carapi.update_vehicle_data(vehicle, slot=slot)
+    -         )
+    +             return None
+    +         return (1, vehicleMaxAmps(vehicle, self.carapi.master.config["config"]))
+      
+    -+    def ampsRange(self, vehicle) -> Optional[Tuple[float, float]]:
+    -+        if vehicle is None:
+    -+            return None
+    -+        return (1, vehicleMaxAmps(vehicle, self.carapi.master.config["config"]))
+    -+
+    +-    # Command methods, shared by both slots: TeslaAPI.command and
+    +-    # wakeOutcome send through the slot that may command the car
+    +-    # (commandSlotFor), and ready() says which provider that is, so each
+    +-    # car's command goes out once. One request each (set_charging_amps below 5 A
+    +-    # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    +-    # the attempt runner wakes first when the attempt says so.
+     +    # Command methods: one request each (set_charging_amps below 5 A
+     +    # excepted, as TeslaPy #42), classified by TeslaAPI.command. Each sends
+     +    # with this provider's slot only, and only when canCommand lets it for
+     +    # the car. No pre-wake: the attempt runner wakes first when the
+     +    # attempt says so.
+    -+
+    -+    # The clock passed to the wake hold; a test may replace it
+    -+    clock = time.time
+    -+
+    -+    def _listed(self, vin: str):
+    -+        # The registry vehicle for vin when the account lists it, or None
+    -+        vehicle = self.carapi.registry.get(vin)
+    -+        return vehicle if vehicle and vehicle.attachment("TeslaAPI") else None
+    -+
+    -+    def _command(self, vin: str, name: str, body: Optional[dict] = None) -> Outcome:
+    -+        vehicle = self._listed(vin)
+    -+        if vehicle is None:
+    -+            return Outcome(UNSUPPORTED, "not listed")
+    + 
+    +     # The clock passed to the wake hold; a test may replace it
+    +     clock = time.time
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+    +         vehicle = self._listed(vin)
+    +         if vehicle is None:
+    +             return Outcome(UNSUPPORTED, "not listed")
+    +-        return self.carapi.command(vehicle, name, body)
+     +        return self.carapi.command(
+     +            vehicle, name, body, slot=getattr(self.carapi, self.slotName)
+     +        )
+    -+
+    -+    def setChargeLimit(self, vin: str, limit: int) -> Outcome:
+    -+        return self._command(vin, "set_charge_limit", {"percent": int(limit)})
+    -+
+    -+    def startCharging(self, vin: str) -> Outcome:
+    -+        outcome = self._command(vin, "charge_start")
+    -+        if outcome == Outcome(SATISFIED, "disconnected"):
+    -+            # Nothing to start: not a start
+    -+            return Outcome(UNSUPPORTED, "disconnected")
+    -+        return outcome
+    -+
+    -+    def stopCharging(self, vin: str) -> Outcome:
+    -+        vehicle = self._listed(vin)
+    -+        if (
+    -+            vehicle is not None
+    + 
+    +     def setChargeLimit(self, vin: str, limit: int) -> Outcome:
+    +         return self._command(vin, "set_charge_limit", {"percent": int(limit)})
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+    +         vehicle = self._listed(vin)
+    +         if (
+    +             vehicle is not None
+    +-            and self.carapi.commandSlotFor(vehicle) is not None
+     +            and self.carapi.canCommand(vehicle, getattr(self.carapi, self.slotName))
+    -+            and self.carapi.onlineState(vehicle, now=self.clock()) is False
+    -+        ):
+    -+            # As main: an asleep car is not charging; settled, never sent (N2)
+    -+            return Outcome(SATISFIED, "asleep, not charging")
+    -+        return self._command(vin, "charge_stop")
+    -+
+    -+    def setAmps(self, vin: str, amps: int) -> Outcome:
+    -+        # Vehicle amps are never 0: 0 would stop the car charging
+    -+        body = {"charging_amps": max(1, int(amps))}
+    -+        outcome = self._command(vin, "set_charging_amps", body)
+    -+        if body["charging_amps"] < 5 and outcome.kind in SETTLED:
+    -+            # A rate below 5 A takes a second identical request (TeslaPy #42)
+    -+            time.sleep(5)
+    -+            outcome = self._command(vin, "set_charging_amps", body)
+    -+        return outcome
+    -+
+    -+    def wake(self, vin: str) -> Outcome:
+    -+        vehicle = self._listed(vin)
+    -+        if vehicle is None:
+    -+            return Outcome(UNSUPPORTED, "not listed")
+    +             and self.carapi.onlineState(vehicle, now=self.clock()) is False
+    +         ):
+    +             # As main: an asleep car is not charging; settled, never sent (N2)
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class _TeslaAPIProvider(Provider):
+    +         vehicle = self._listed(vin)
+    +         if vehicle is None:
+    +             return Outcome(UNSUPPORTED, "not listed")
+    +-        return self.carapi.wakeOutcome(vehicle, now=self.clock())
+     +        return self.carapi.wakeOutcome(
+     +            vehicle, now=self.clock(), slot=getattr(self.carapi, self.slotName)
+     +        )
+    -+
+    + 
+      
+      class OwnerAPIProvider(_TeslaAPIProvider):
+    --    # Declares no commands: the inherited command methods answer UNSUPPORTED
+    +-    # Commands only a car Tesla lists with command_signing "off": free, but
+    +-    # paced as Fleet (OWNER_COMMAND)
+     +    # Commands only a car Tesla lists with command_signing "off" (#659):
+     +    # free, but paced as Fleet (OWNER_COMMAND)
+          name = "OwnerAPI"
+          rank = 4
+          local = False
+    -     DECLARATIONS = {
+    -         READ_CHARGE: Declaration(CLOUD_FREE),
+    -+        SET_CHARGE_LIMIT: Declaration(OWNER_COMMAND),
+    -+        START_CHARGING: Declaration(OWNER_COMMAND),
+    -+        STOP_CHARGING: Declaration(OWNER_COMMAND),
+    -+        SET_AMPS: Declaration(OWNER_COMMAND),
+    -+        WAKE: Declaration(OWNER_COMMAND),
+    -         READ_WALL_CONNECTOR_VINS: WALL_CONNECTOR_VINS,
+    -     }
+    -     SUPPRESSED = CLOUD_SUPPRESSED
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(_TeslaAPIProvider):
+                  return self.carapi.wallConnectorVinsReady(self.carapi.ownerSlot)
+              if vehicle is None or capability not in self.declarations():
+                  return False
+    --        return (
+    --            self.carapi.ownerSlot.usable("read")
+    --            and vehicle.attachment("TeslaAPI") is not None
+    --        )
+    +-        car = vehicle.attachment("TeslaAPI")
+    +-        if car is None:
+     +        if vehicle.attachment("TeslaAPI") is None:
+    -+            return False
+    -+        if capability in COMMANDS:
+    +             return False
+    +         if capability in COMMANDS:
+    +-            # Says once why a car is read-only, as the module would have
+    +-            return self.available(capability) and not self.carapi.refuseCommandFor(
+    +-                vehicle, TESLA_COMMAND[capability]
+    +-            )
+     +            # Says once why a car is read-only
+     +            if self.carapi.refuseCommandFor(vehicle, TESLA_COMMAND[capability]):
+     +                return False
+     +            return self.carapi.canCommand(vehicle, self.carapi.ownerSlot)
+    -+        return self.carapi.ownerSlot.usable("read")
+    -+
+    -+    def available(self, capability) -> bool:
+    -+        # The broadcast gate for commands: an Owner token that may command
+    +         return self.carapi.ownerSlot.usable("read")
+    + 
+    +     def available(self, capability) -> bool:
+    +         # The broadcast gate for commands: an Owner token that may command
+    +-        # some listed car, or whose cars are not listed yet, while no Fleet
+    +-        # token commands (TeslaAPI then sends through the Fleet slot)
+     +        # some car
+    -+        if capability in COMMANDS:
+    -+            return (
+    +         if capability in COMMANDS:
+    +             return (
+    +-                not self.carapi.fleetSlot.usable("command") and not self.carapi.readOnly
+     +                self.carapi.ownerTokenHeld()
+     +                and "command" not in self.carapi.ownerSlot.refusedPurposes
+    -+            )
+    -+        return True
+    +             )
+    +         return True
+      
+    -     def wallConnectorVins(self) -> Optional[Dict[str, str]]:
+    -         return self.carapi.wallConnectorVins(self.carapi.ownerSlot)
+     @@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+    -         )
+    - 
+          def available(self, capability) -> bool:
+    --        # The broadcast gate: an Owner-only install never sends a
+    --        # vehicle-less command here, as today's read-only refusal skips it
+    -+        # The broadcast gate: without a Fleet command token no vehicle-less
+    -+        # command comes here (an Owner token's commands go per car, through
+    +         # The broadcast gate: without a Fleet command token no vehicle-less
+    +         # command comes here (an Owner token's commands go per car, through
+    +-        # the OwnerAPI provider). While no listed car can be commanded, the
+    +-        # module says once why, as it would when called.
+     +        # the OwnerAPI provider)
+              if capability in COMMANDS:
+                  usable = self.carapi.fleetSlot.usable("command")
+                  if not usable:
+    -@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(_TeslaAPIProvider):
+    +-                self.carapi.refuseCommandIfReadOnly(TESLA_COMMAND[capability])
+    ++                self.carapi.noteReadOnly()
+    +             return usable
+    +         if capability == READ_WALL_CONNECTOR_VINS:
+                  return self.carapi.wallConnectorVinsReady(self.carapi.fleetSlot)
+    -         return self.carapi.fleetSlot.usable("read")
+    - 
+    --    def ampsRange(self, vehicle) -> Optional[Tuple[float, float]]:
+    --        if vehicle is None:
+    --            return None
+    --        return (1, vehicleMaxAmps(vehicle, self.carapi.master.config["config"]))
+    --
+    --    # Command methods: one billed request each (set_charging_amps below 5 A
+    --    # excepted, as TeslaPy #42), classified by TeslaAPI.command. No pre-wake:
+    --    # the attempt runner wakes first when the attempt says so.
+    --
+    --    # The clock passed to the wake hold; a test may replace it
+    --    clock = time.time
+    --
+    --    def _listed(self, vin: str):
+    --        # The registry vehicle for vin when the account lists it, or None
+    --        vehicle = self.carapi.registry.get(vin)
+    --        return vehicle if vehicle and vehicle.attachment("TeslaAPI") else None
+    --
+    --    def _command(self, vin: str, name: str, body: Optional[dict] = None) -> Outcome:
+    --        vehicle = self._listed(vin)
+    --        if vehicle is None:
+    --            return Outcome(UNSUPPORTED, "not listed")
+    --        return self.carapi.command(vehicle, name, body)
+    --
+    --    def setChargeLimit(self, vin: str, limit: int) -> Outcome:
+    --        return self._command(vin, "set_charge_limit", {"percent": int(limit)})
+    --
+    --    def startCharging(self, vin: str) -> Outcome:
+    --        outcome = self._command(vin, "charge_start")
+    --        if outcome == Outcome(SATISFIED, "disconnected"):
+    --            # Nothing to start: not a start
+    --            return Outcome(UNSUPPORTED, "disconnected")
+    --        return outcome
+    --
+    --    def stopCharging(self, vin: str) -> Outcome:
+    --        vehicle = self._listed(vin)
+    --        if (
+    --            vehicle is not None
+    --            and self.carapi.slotFor("command") is not None
+    --            and self.carapi.onlineState(vehicle, now=self.clock()) is False
+    --        ):
+    --            # As main: an asleep car is not charging; settled, never sent (N2)
+    --            return Outcome(SATISFIED, "asleep, not charging")
+    --        return self._command(vin, "charge_stop")
+    --
+    --    def setAmps(self, vin: str, amps: int) -> Outcome:
+    --        # Vehicle amps are never 0: 0 would stop the car charging
+    --        body = {"charging_amps": max(1, int(amps))}
+    --        outcome = self._command(vin, "set_charging_amps", body)
+    --        if body["charging_amps"] < 5 and outcome.kind in SETTLED:
+    --            # A rate below 5 A takes a second identical request (TeslaPy #42)
+    --            time.sleep(5)
+    --            outcome = self._command(vin, "set_charging_amps", body)
+    --        return outcome
+    --
+    --    def wake(self, vin: str) -> Outcome:
+    --        vehicle = self._listed(vin)
+    --        if vehicle is None:
+    --            return Outcome(UNSUPPORTED, "not listed")
+    --        return self.carapi.wakeOutcome(vehicle, now=self.clock())
+    --
+    -     def wallConnectorVins(self) -> Optional[Dict[str, str]]:
+    -         return self.carapi.wallConnectorVins(self.carapi.fleetSlot)
+     
+      ## lib/TWCManager/Vehicle/Reconcile/Outcome.py ##
+     @@ lib/TWCManager/Vehicle/Reconcile/Outcome.py: EXCLUDING = frozenset({UNSUPPORTED, REFUSED})
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiState:
+          delayNextWakeAttempt = 0
+          online = None  # the free online check: True, False, None (no answer)
+          onlineCheckedAt = 0  # ... reused for 120 s from here
+    +-    # command_signing from Tesla's vehicle list: Owner API commands go only
+    +-    # to cars where it is "off". ownerCommandsRefused is set when Tesla
+    +-    # refuses one anyway; ownerCommandsRetired too when the refusal says the
+    +-    # Owner API no longer takes commands (410/412, "only available on
+    +-    # fleetapi") rather than that the car needs signing. refusalLoggedAt is
+    +-    # TeslaAPI.refusalState when the car's read-only line was last logged.
+     +    # As listed: Owner API commands only for "off" (#659). The latch is set
+     +    # by a 403 to one (noteOwnerCommandRefused)
+    -+    commandSigning = None
+    -+    ownerCommandsRefused = False
+    +     commandSigning = None
+    +     ownerCommandsRefused = False
+    +-    ownerCommandsRetired = False
+    +-    refusalLoggedAt = None
+     +    refusalLoggedAt = None  # refusalState when its read-only line was logged
+      
+      
+      class TLS13Adapter(HTTPAdapter):
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +     COMMAND_UNREACHABLE_REASONS = ("could_not_wake_buses", "vehicle_unavailable")
+    +     # Seconds between failed wake_up attempts on one car (a wake is $0.02)
+    +     WAKE_RETRY_SECONDS = 30 * 60
+    +-    # fleetSlot.changes when the module-wide read-only line was last logged
+    +-    refusalLoggedAt = None
+    +     regionURL = {
+              "NA": "https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/vehicles",
+              "EU": "https://fleet-api.prd.eu.vn.cloud.tesla.com/api/1/vehicles",
+              "CN": "https://fleet-api.prd.cn.vn.cloud.tesla.cn/api/1/vehicles",
+    --        # Not a Fleet region: the read-only Owner API used by TeslaMate tokens.
+    +-        # Not a Fleet region: the Owner API used by TeslaMate tokens. It reads
+    +-        # every car but commands only cars Tesla lists with command_signing
+    +-        # "off" (see commandSlotFor). fleetRegions() leaves it out of every
+    +-        # region list and lookup.
+     +        # Not a Fleet region: the Owner API used by TeslaMate tokens. It reads,
+     +        # and commands only a car that takes unsigned commands (#659).
+    -         # fleetRegions() leaves it out of every region list and lookup.
+    ++        # fleetRegions() leaves it out of every region list and lookup.
+              "OwnerAPI": "https://owner-api.teslamotors.com/api/1/vehicles",
+          }
+    +     # teslaProxy base URL and certificate from config.json, used for Fleet
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              # A listed car joins the registry with this module's record attached
+              if "vin" not in json:
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                  # The registry refuses a missing or malformed VIN.
+                  logger.debug("Skipping a listed vehicle without a usable VIN")
+                  return
+    --        # The Owner API never commands; the Fleet claim follows the Fleet
+    --        # slot live, so a token pasted or synced after the listing manages
+    --        # the car without a re-list
+    --        vehicle.claim("OwnerAPI", False, "listed")
+    +-        car = vehicle.attachment("TeslaAPI")
+    +-        car.commandSigning = json.get("command_signing")
+    +-        car.ownerCommandsRefused = False
+    +-        car.ownerCommandsRetired = False
+    +-        # The Owner claim follows this car's command_signing and the Fleet
+    +-        # claim the Fleet slot, live, so a token pasted or synced after the
+    +-        # listing manages the car without a re-list
+    +-        vehicle.claim("OwnerAPI", lambda: self.ownerCommandsAllowed(vehicle), "listed")
+     +        # Each claim follows its slot live, so a token pasted or synced after
+     +        # the listing manages the car without a re-list; the Owner claim also
+     +        # follows this car's signing (#659)
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              body=None,
+              timeout=10,
+     -        car=None,
+    -+        vehicle=None,
+    -         tries=3,
+    +-        tries=3,
+    +         vehicle=None,
+    ++        tries=3,
+          ):
+              # One request with slot's token to path under the API root (where
+    +         # .../api/1/vehicles lives), bounded by timeout. Returns (response,
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +                 logging.INFO8,
+                      "Car API %s %s: HTTP %s" % (method, path, req.status_code),
+                  )
+    +-            if (
+    +-                purpose in ("command", "wake")
+    +-                and slot is self.ownerSlot
+    +-                and vehicle is not None
+    +-                and self.noteOwnerCommandRefused(vehicle, req)
+    +-            ):
+    +-                # Tesla refused the Owner API for this car (logged, latched):
+    +-                # no error backoff, so the next provider sends at once
+    +-                return req, Outcome(REFUSED, "owner refused")
+                  outcome = self._classify(
+     -                slot, req.status_code, purpose, req.text, car, tries > 0
+     +                slot, req.status_code, purpose, req.text, vehicle, tries > 0
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+      
+          def slotFor(self, purpose):
+     -        # The slot a request of this purpose ("read", "command" or "energy")
+    --        # uses, or None when no slot is usable for it. The only chooser.
+    +-        # uses, or None when no slot is usable for it. Only a Fleet token
+    +-        # serves "command" here; commands to a car choose with commandSlotFor.
+     +        # The slot a request of this purpose ("read" or "energy") uses, or
+     +        # None when no slot is usable for it. Commands and wakes go to one
+     +        # car, so each provider asks canCommand for its own slot.
+              for slot in (self.ownerSlot, self.fleetSlot):
+                  if slot.usable(purpose):
+                      return slot
+    -@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         return None
+      
+    +-    def ownerTokenHeld(self):
+    +-        # True when the owner slot holds a live Owner API token. A read
+    +-        # pause does not count: it is for reads only.
+    +-        return not self.ownerSlot.empty() and self.ownerSlot.tokenType == "owner"
+    +-
+    +-    @staticmethod
+    +-    def _carOf(vehicle):
+    +-        # The listed car's CarApiState, from its registry Vehicle (or itself)
+    +-        if hasattr(vehicle, "attachment"):
+    +-            return vehicle.attachment("TeslaAPI")
+    +-        return vehicle
+    +-
+    +-    def ownerCommandsAllowed(self, vehicle):
+    +-        # True when an Owner API token may command this car: Tesla listed it
+    +-        # with command_signing exactly "off" and has not since refused an
+    +-        # Owner API command for it. "required", a missing field and any
+    +-        # other value are read-only (fail closed).
+    +-        car = self._carOf(vehicle)
+    +-        return (
+    +-            car is not None
+    +-            and self.ownerTokenHeld()
+    +-            and car.commandSigning == "off"
+    +-            and not car.ownerCommandsRefused
+    +-        )
+    +-
+    +-    def commandSlotFor(self, vehicle):
+    +-        # The slot a command to this car uses, or None when it is read-only.
+    +-        # Fleet first, so a working Fleet (and proxy) setup is unchanged;
+    +-        # the Owner token only carries commands when Fleet can't.
+    +-        if self.fleetSlot.usable("command"):
+    +-            return self.fleetSlot
+    +-        if self.ownerCommandsAllowed(vehicle):
+    +-            return self.ownerSlot
+    +-        return None
+    +-
+    +-    def readOnlyFor(self, vehicle):
+    +-        # True when no slot can send this car commands.
+    +-        return self.commandSlotFor(vehicle) is None
+    +-
+          @property
+          def readOnly(self):
+    --        # True when no slot can send vehicle commands.
+    --        return self.slotFor("command") is None
+    -+        # True when no listed car can be sent commands. With an Owner token
+    -+        # and no cars listed yet it is False: whether the token can command
+    +         # True when no listed car can be sent commands. With an Owner token
+    +         # and no cars listed yet it is False: whether the token can command
+    +-        # is only known once they are listed, and only a read (or
+    +-        # telemetry) lists them. Commands still check each car.
+     +        # is only known once they are listed. Commands still check each car.
+    -+        if self.fleetSlot.usable("command"):
+    -+            return False
+    +         if self.fleetSlot.usable("command"):
+    +             return False
+    +-        listed = self.registry.attached("TeslaAPI")
+    +-        if not listed:
+     +        attached = self.registry.attached("TeslaAPI")
+     +        if not attached:
+    -+            return not self.ownerTokenHeld()
+    +             return not self.ownerTokenHeld()
+    +-        return not any(self.ownerCommandsAllowed(car) for _, car in listed)
+     +        return not any(self.ownerCommandsAllowed(car) for _, car in attached)
+    -+
+    -+    @property
+    -+    def ownerTokenOnly(self):
+    -+        # True when only an Owner API token is held for commands, so which
+    + 
+    +     @property
+    +     def ownerTokenOnly(self):
+    +         # True when only an Owner API token is held for commands, so which
+    +-        # cars can be commanded depends on each car's command_signing.
+     +        # cars can be commanded depends on each car's command_signing
+    -+        return not self.fleetSlot.usable("command") and self.ownerTokenHeld()
+    -+
+    +         return not self.fleetSlot.usable("command") and self.ownerTokenHeld()
+    + 
+     +    def canCommand(self, vehicle, slot):
+     +        # Whether slot (a provider's own) may send vehicle (a registry
+     +        # Vehicle) a command or wake: the Owner slot only for a car that
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +            and car.commandSigning == "off"
+     +            and not car.ownerCommandsRefused
+     +        )
+    - 
+    ++
+          def loadVehicleList(self):
+              # List the cars (attach their records) from the vehicle list of the read slot
+    +         # (Owner API /products, else the Fleet API vehicle list). Returns True
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +             return ("fleet", "NA")
+              return ("unknown", None)
+      
+    -     def noteReadOnly(self):
+    --        # The INFO hint, once per Fleet slot change: no HTTP call, no API
+    --        # error (an error would start the backoff that also blocks reads)
+    --        if not self.readOnly or self.fleetSlot.changes == self.refusalLoggedAt:
+    +-    def refuseCommandIfReadOnly(self, command):
+    +-        # True when no listed car can be sent commands. Logs at INFO once per
+    +-        # state change (per car when an Owner token is held), makes no HTTP
+    +-        # call and records no API error (an error would start the backoff
+    +-        # that also blocks reads).
+    +-        if not self.readOnly:
+    +-            return False
+    +-        if self.ownerTokenHeld():
+    +-            for vehicle, _ in self.registry.attached("TeslaAPI"):
+    +-                self.refuseCommandFor(vehicle, command)
+    +-        elif self.fleetSlot.changes != self.refusalLoggedAt:
+    +-            logger.info(
+    +-                "Tesla API is read-only (no usable Fleet API token); not sending "
+    +-                + command
+    +-                + " or any other vehicle command. Commands need a Fleet API "
+    +-                "token or the TeslaBLE module."
+    +-            )
+    +-            self.refusalLoggedAt = self.fleetSlot.changes
+    +-        return True
+    ++    def noteReadOnly(self):
+     +        # The INFO hint when no token can command any car, once per Fleet
+     +        # slot change: no HTTP call, no API error (an error would start the
+     +        # backoff that also blocks reads). With an Owner token each car says
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +            or self.ownerTokenHeld()
+     +            or self.fleetSlot.changes == self.refusalLoggedAt
+     +        ):
+    -             return
+    -         self.refusalLoggedAt = self.fleetSlot.changes
+    -         logger.info(
+    -@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -             "TeslaBLE module."
+    -         )
+    ++            return
+    ++        self.refusalLoggedAt = self.fleetSlot.changes
+    ++        logger.info(
+    ++            "Tesla API is read-only (no usable Fleet API token); not sending "
+    ++            "vehicle commands. Commands need a Fleet API token or the "
+    ++            "TeslaBLE module."
+    ++        )
+      
+    -+    def refusalState(self, car):
+    +     def refusalState(self, car):
+    +-        # What a car's refusal log line depends on; it is logged again only
+    +-        # when this changes. Not the owner slot's changes: a resync of the
+    +-        # same Owner token is not news.
+    +-        return (self.fleetSlot.changes, car.commandSigning, car.ownerCommandsRefused)
+     +        # What a car's refusal line depends on; it is logged again only when
+     +        # this changes. Not the Owner slot's changes: a resync of the same
+     +        # Owner token is not news
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +            car.ownerCommandsRefused,
+     +            "command" in self.ownerSlot.refusedPurposes,
+     +        )
+    -+
+    -+    def refuseCommandFor(self, vehicle, command):
+    + 
+    +     def refuseCommandFor(self, vehicle, command):
+    +-        # True when no slot can send this car commands. Like
+    +-        # refuseCommandIfReadOnly: no HTTP call, no API error, and one INFO
+    +-        # line per state change, naming the car and why.
+    +-        if not self.readOnlyFor(vehicle):
+     +        # True when no slot can send vehicle commands. No HTTP call, no API
+     +        # error, and one INFO line per state change, naming the car and why
+     +        if self.canCommand(vehicle, self.fleetSlot) or self.canCommand(
+     +            vehicle, self.ownerSlot
+     +        ):
+    -+            return False
+    -+        if not self.ownerTokenHeld():
+    +             return False
+    +         if not self.ownerTokenHeld():
+    +-            # No token can command any car: the module-wide line.
+    +-            self.refuseCommandIfReadOnly(command)
+    +-            return True
+    +-        car = self._carOf(vehicle)
+    +-        if car is None:
+     +            # No token can command any car: the module-wide line
+     +            self.noteReadOnly()
+    -+            return True
+    +             return True
+     +        car = vehicle.attachment("TeslaAPI")
+    -+        state = self.refusalState(car)
+    -+        if car.refusalLoggedAt == state:
+    -+            return True
+    -+        car.refusalLoggedAt = state
+    +         state = self.refusalState(car)
+    +         if car.refusalLoggedAt == state:
+    +             return True
+    +         car.refusalLoggedAt = state
+    +-        signing = car.commandSigning
+    +-        if car.ownerCommandsRetired:
+    +-            why = "Tesla's Owner API no longer takes commands for it."
+     +        if "command" in self.ownerSlot.refusedPurposes:
+     +            why = (
+     +                "Tesla refused commands with the Owner API token (it no longer "
+     +                "accepts Owner API commands, or the token expired and could "
+     +                "not be refreshed)."
+     +            )
+    -+        elif car.ownerCommandsRefused:
+    -+            why = (
+    -+                "Tesla refused an Owner API command for it although it "
+    -+                "reported command_signing: off."
+    -+            )
+    +         elif car.ownerCommandsRefused:
+    +             why = (
+    +                 "Tesla refused an Owner API command for it although it "
+    +                 "reported command_signing: off."
+    +             )
+    +-        elif signing == "required":
+     +        elif car.commandSigning == "required":
+    -+            why = (
+    +             why = (
+    +-                "Tesla reports "
+    +-                + vehicle.name
+    +-                + " requires signed commands (command_signing: required)."
+    +-            )
+    +-        elif signing is None:
+    +-            why = (
+    +-                "Tesla did not report command_signing for it, so it is "
+    +-                "treated as read-only."
+     +                "Tesla reports %s requires signed commands (command_signing: "
+     +                "required)." % vehicle.name
+    -+            )
+    -+        else:
+    -+            why = (
+    +             )
+    +         else:
+    +             why = (
+    +-                "Tesla reports command_signing: "
+    +-                + str(signing)
+    +-                + " for it, a value TWCManager does not know, so it is "
+     +                "Tesla did not report command_signing: off for it, so it is "
+    -+                "treated as read-only."
+    -+            )
+    -+        logger.info(
+    +                 "treated as read-only."
+    +             )
+    +         logger.info(
+    +-            "Tesla API is read-only for "
+    +-            + vehicle.name
+    +-            + "; not sending "
+    +-            + command
+    +-            + " or any other vehicle command to it. "
+    +-            + why
+    +-            + " Charge commands need a Fleet API token with the Vehicle "
+    +-            "Command proxy (teslaProxy) or the TeslaBLE module."
+     +            "Tesla API is read-only for %s; not sending %s or any other vehicle "
+     +            "command to it. %s Charge commands need a Fleet API token with the "
+     +            "Vehicle Command proxy (teslaProxy) or the TeslaBLE module."
+     +            % (vehicle.name, command, why)
+    -+        )
+    -+        return True
+    -+
+    +         )
+    +         return True
+    + 
+    +-    def noteOwnerCommandRefused(self, vehicle, req):
+    +-        # True when Tesla refused an Owner API command for this car. Two
+    +-        # causes: HTTP 403 or an error naming the Vehicle Command Protocol
+    +-        # (the car needs signed commands after all), or HTTP 410/412 or
+    +-        # "only available on fleetapi" (the Owner API no longer takes
+    +-        # commands). Stops Owner API commands to it until TWCManager
+    +-        # restarts, and logs that once. Records no API error, which would
+    +-        # also back off reads; the caller returns its failure, so the next
+    +-        # provider is tried.
+    +-        car = self._carOf(vehicle)
+    +-        if req is None or car is None:
+    +-            return False
+    +-        text = str(getattr(req, "text", "") or "")
+     +    def ownerRefusal(self, vehicle, status, body):
+     +        # An Owner API command's or wake's answer (any status, 200 included)
+     +        # that refuses it, acted on: Tesla takes no Owner commands at all
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +        # never a slot-wide refusal: the other cars keep their commands.
+     +        # Returns the refusal, or None for any other answer. Tesla's error
+     +        # text is matched, never logged
+    -+        try:
+    +         try:
+    +-            error = str((json.loads(text) or {}).get("error") or "")
+     +            error = str((json.loads(body) or {}).get("error") or "")
+    -+        except (ValueError, AttributeError, TypeError):
+    -+            error = ""
+    +         except (ValueError, AttributeError, TypeError):
+    +             error = ""
+    +-        if "Vehicle Command Protocol required" in error:
+    +-            retired = False
+    +-        elif (
+    +-            req.status_code in (410, 412)
+    +-            or "only available on fleetapi" in text.lower()
+    +-        ):
+    +-            retired = True
+    +-        elif req.status_code == 403:
+    +-            retired = False
+    +-        else:
+    +-            return False
+    +-        car.ownerCommandsRefused = True
+    +-        car.ownerCommandsRetired = retired
+    +-        car.refusalLoggedAt = self.refusalState(car)
+    +-        answer = " (HTTP " + str(req.status_code) + (": " + error if error else "")
+    +-        if retired:
+    +-            logger.warning(
+    +-                "Tesla's Owner API no longer takes commands for "
+    +-                + vehicle.name
+    +-                + answer
+    +-                + "). Not sending it further Owner API commands; charge "
+    +-                "commands need a Fleet API token or the TeslaBLE module."
+    +-            )
+    +-        else:
+     +        if status != 403 and "Vehicle Command Protocol required" not in error:
+     +            return None
+     +        car = vehicle.attachment("TeslaAPI")
+     +        if car is not None and not car.ownerCommandsRefused:
+     +            car.ownerCommandsRefused = True
+     +            car.refusalLoggedAt = self.refusalState(car)
+    -+            logger.warning(
+    +             logger.warning(
+    +-                "Tesla refused an Owner API command for "
+    +-                + vehicle.name
+    +-                + answer
+    +-                + ") although it reported command_signing: off; it needs "
+    +-                "signed commands. Not sending it further Owner API commands; "
+    +-                "charge commands need a Fleet API token with the Vehicle "
+    +-                "Command proxy (teslaProxy) or the TeslaBLE module."
+     +                "Tesla refused an Owner API command for %s (HTTP %d) although "
+     +                "it reported command_signing: off. Not sending it further "
+     +                "Owner API commands; charge commands need a Fleet API token "
+     +                "with the Vehicle Command proxy (teslaProxy) or the TeslaBLE "
+     +                "module." % (vehicle.name, status)
+    -+            )
+    +             )
+    +-        return True
+     +        return _SIGNING_REQUIRED
+    -+
+    + 
+          def applySyncedToken(self, accessToken):
+              # Entry point for token sync sources (TeslaMate): the access token
+    -         # only, so a synced slot never refreshes. Accepted whether or not
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          # most one billed request (two only when an expired token is refreshed
+          # in between). Nothing here retries a billed request.
+      
+     -    def command(self, vehicle, name: str, body: Optional[dict] = None) -> Outcome:
+    --        # One Fleet API command (name, e.g. "set_charge_limit") to vehicle
+    +-        # One Tesla API command (name, e.g. "set_charge_limit") to vehicle,
+    +-        # through the slot that may command this car (commandSlotFor)
+     +    def command(
+     +        self, vehicle, name: str, body: Optional[dict] = None, *, slot
+     +    ) -> Outcome:
+     +        # One command (name, e.g. "set_charge_limit") to vehicle with slot,
+     +        # the provider's own, when canCommand lets it
+              car = vehicle.attachment("TeslaAPI")
+    --        slot = self.slotFor("command")
+    +-        slot = self.commandSlotFor(vehicle)
+     -        if slot is None:
+    +-            # Says once why this car is read-only
+    +-            self.refuseCommandFor(vehicle, name)
+     +        if not self.canCommand(vehicle, slot):
+                  return Outcome(REFUSED, "no command token")
+              if self.getCarApiRetryRemaining(car, now=self.now()):
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                  purpose,
+                  body,
+     -            car=vehicle.attachment("TeslaAPI"),
+    -+            vehicle=vehicle,
+    +             vehicle=vehicle,
+              )
+              if outcome is not None:
+    -             return outcome, None
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                  return False
+              return True
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              # and wakeDue allows it. One wake_up at most.
+              now = self.now() if now is None else now
+              car = vehicle.attachment("TeslaAPI")
+    --        slot = self.slotFor("command")
+    +-        slot = self.commandSlotFor(vehicle)
+     -        if slot is None:
+    +-            self.refuseCommandFor(vehicle, "wake_up")
+     +        if not self.canCommand(vehicle, slot):
+                  return Outcome(REFUSED, "no command token")
+              if self.getCarApiRetryRemaining(car, now=now):
+                  # Told to back off: not even the free check
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    -         if awake is None:
+    -             # No free answer (no read token, an error): never wake blind
+    -             return Outcome(UNREACHABLE, "online check failed")
+    --        if not slot.usable("wake"):
+    -+        if slot is self.fleetSlot and not slot.usable("wake"):
+    +         if slot is self.fleetSlot and not slot.usable("wake"):
+                  # Tesla refused a wake with this token (403): no wake_up until
+                  # the token changes. Checked after the free online check, so an
+    --            # online car still gets its command
+    +-            # online car still gets its command. An Owner refusal is noted
+    +-            # per car instead
+     +            # online car still gets its command. An Owner 403 latches the
+     +            # car instead (ownerCommandsAllowed)
+                  return Outcome(UNREACHABLE, "wake refused")
+    @@ lib/TWCManager/Vehicle/TeslaTokenSlot.py: class TeslaTokenSlot:
+              return True
+      
+          def grants(self, purpose):
+    --        # Whether this kind of token can serve the purpose at all. Read-only
+    --        # is just a scope the Owner API never grants: it serves reads and
+    --        # energy, never commands.
+    +-        # Whether this kind of token can serve the purpose for every car. An
+    +-        # Owner token serves reads and energy; it commands only cars Tesla
+    +-        # lists with command_signing "off", which TeslaAPI.commandSlotFor
+    +-        # decides per car, so it never grants "command" here.
+     +        # Whether this kind of token can serve the purpose for every car.
+     +        # An Owner token serves reads and energy; it commands only a car
+     +        # that takes unsigned commands, which TeslaAPI.canCommand
+    @@ lib/TWCManager/Vehicle/TeslaTokenSlot.py: class TeslaTokenSlot:
+     
+      ## tests/unit/teslatokens.py ##
+     @@ tests/unit/teslatokens.py: def no_threads():
+    -     request it need not change."""
+    - 
+    - 
+    --def add_home_vehicle(api):
+    --    """Add vehicle 5YJ3E1EA1KF000001, at home and recently contacted, so _ready
+    --    is True without an HTTP call; returns its registry vehicle. Use with the
+    --    no_threads fixture."""
+    --    api.addVehicle({"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"})
+    --    vehicle = api.registry.get("5YJ3E1EA1KF000001")
+    -+def add_home_vehicle(
+    -+    api, command_signing=None, vin="5YJ3E1EA1KF000001", name="Car", id=1
+    -+):
+    + def add_home_vehicle(
+    +     api, command_signing=None, vin="5YJ3E1EA1KF000001", name="Car", id=1
+    + ):
+    +-    """Add a vehicle (5YJ3E1EA1KF000001 by default), at home and recently
+    +-    contacted, so _ready is True without an HTTP call; returns its registry
+    +-    vehicle. command_signing is the /products field; None leaves it out. Use
+    +-    with the no_threads fixture."""
+    +-    entry = {"id": id, "vin": vin, "display_name": name}
+     +    """Add a vehicle (5YJ3E1EA1KF000001 unless vin says otherwise), at home and
+     +    recently contacted, so _ready is True without an HTTP call; returns its
+     +    registry vehicle. Its /products entry carries command_signing unless that
+     +    is None. Use with the no_threads fixture."""
+     +    listed = {"id": id, "vin": vin, "display_name": name}
+    -+    if command_signing is not None:
+    +     if command_signing is not None:
+    +-        entry["command_signing"] = command_signing
+    +-    api.addVehicle(entry)
+     +        listed["command_signing"] = command_signing
+     +    api.addVehicle(listed)
+    -+    vehicle = api.registry.get(vin)
+    +     vehicle = api.registry.get(vin)
+          car = vehicle.attachment("TeslaAPI")
+          car.atHome = True
+    -     car.lastAPIAccessTime = time.time()
+     
+      ## tests/unit/test_command_path_parity.py ##
+     @@ tests/unit/test_command_path_parity.py: from tests.unit.test_limit_reconciler import VIN, setup
+    @@ tests/unit/test_provider_tables.py: def test_tables_match_the_declarations_they_
+          assert byName["Gen3TWC"].declarations() == {c: D(C.LOCAL) for c in (C.SET_AMPS, C.START_CHARGING, C.STOP_CHARGING)}
+          assert byName["TeslaBLE"].declarations() == {c: D(C.LOCAL) for c in (C.READ_CHARGE, C.SET_CHARGE_LIMIT, C.START_CHARGING, C.STOP_CHARGING, C.SET_AMPS, C.WAKE)}
+          wcv = D(C.CLOUD_FREE)
+    --    assert byName["OwnerAPI"].declarations() == {C.READ_CHARGE: D(C.CLOUD_FREE), C.READ_WALL_CONNECTOR_VINS: wcv}
+    +-    assert byName["OwnerAPI"].declarations() == dict({C.READ_CHARGE: D(C.CLOUD_FREE), C.READ_WALL_CONNECTOR_VINS: wcv}, **{c: D(C.OWNER_COMMAND) for c in C.COMMANDS})
+     +    assert byName["OwnerAPI"].declarations() == {C.READ_CHARGE: D(C.CLOUD_FREE),
+     +        C.SET_CHARGE_LIMIT: D(C.OWNER_COMMAND), C.START_CHARGING: D(C.OWNER_COMMAND), C.STOP_CHARGING: D(C.OWNER_COMMAND), C.SET_AMPS: D(C.OWNER_COMMAND),
+     +        C.WAKE: D(C.OWNER_COMMAND), C.READ_WALL_CONNECTOR_VINS: wcv}   # #659: unsigned cars only
+    @@ tests/unit/test_teslaapi_providers.py: def test_two_providers_with_honest_costs(
+              5,
+              False,
+          )
+    --    assert owner.cost(C.READ_CHARGE) == C.CLOUD_FREE and owner.cost(C.SET_AMPS) is None
+    +-    assert owner.cost(C.READ_CHARGE) == C.CLOUD_FREE and owner.cost(C.SET_AMPS) == C.OWNER_COMMAND
+     +    assert owner.cost(C.READ_CHARGE) == C.CLOUD_FREE
+     +    # Free, but paced as Fleet (#659)
+     +    assert owner.cost(C.SET_AMPS) == C.OWNER_COMMAND and C.OWNER_COMMAND.price == 0.0
+    @@ tests/unit/test_teslaapi_providers.py: def test_fleet_commands_resolve_the_car_b
+     +    api.wakeOutcome.assert_called_once_with(v, now=1000.0, slot=api.fleetSlot)
+          assert fleet.setAmps("5YJ3E1EA1KF000009", 10) == O.Outcome(O.UNSUPPORTED, "not listed")
+          assert fleet.wake("5YJ3E1EA1KF000009") == O.Outcome(O.UNSUPPORTED, "not listed")
+    --    assert owner.setAmps(VIN, 10).kind == O.UNSUPPORTED    # Owner declares no commands
+    +-    assert owner.setAmps(VIN, 10) == O.Outcome(O.DONE)    # the Owner provider shares the command path
+     +    # Each provider sends with its own slot only (#659)
+     +    api.command.reset_mock()
+     +    assert owner.setAmps(VIN, 10) == O.Outcome(O.DONE)
+    @@ tests/unit/test_teslaapi_readonly_gate.py
+      """
+      Read-only command gate.
+      
+    --While TeslaAPI holds no usable Fleet API token (readOnly), e.g. only an
+    --Owner API token, no vehicle command may reach Tesla: the provider order keeps
+    --FleetAPI out of every command walk, and
+    --the Fleet provider's commands refuse without an HTTP call and without
+    --recording an API error (which would back off reads too). Reads still run.
+    +-Without a usable Fleet API token, TeslaAPI commands a vehicle with an Owner
+    +-API token only when Tesla's /products entry for that vehicle says
+    +-command_signing "off". Every other vehicle (signing "required", the field
+    +-missing, or a value never seen) is read-only, as is every vehicle when no
+    +-token can command: no vehicle command may reach Tesla. The provider order
+    +-keeps TeslaAPI out of a command walk for a read-only car (OwnerAPI is not
+    +-ready for it) and out of every broadcast while every listed car is
+    +-read-only (neither provider is available), and the providers' commands
+    +-refuse per vehicle without an HTTP call and without recording an API error
+    +-(which would back off reads too). Reads still run.
+     +Commands follow the vehicle, not only the token. A Fleet API token commands
+     +every listed car. An Owner API token commands only a car whose /products
+     +entry says command_signing "off" (#659), until Tesla answers one of its
+    @@ tests/unit/test_teslaapi_readonly_gate.py
+      """
+      
+      import logging
+    - import re
+    -+import time
+    - from unittest.mock import Mock
+    - 
+    - import pytest
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: import pytest
+      import requests_mock as rm
+      
+    --from TWCManager.Vehicle.Reconcile.Outcome import DONE, REFUSED, Outcome
+    -+from TWCManager.Vehicle.Providers import Capability as C
+    + from TWCManager.Vehicle.Providers import Capability as C
+    +-from TWCManager.Vehicle.Reconcile.Outcome import DONE, REFUSED, UNSUPPORTED, Outcome
+     +from TWCManager.Vehicle.Reconcile.Outcome import DONE, ERROR, REFUSED, Outcome
+      
+      from tests.unit.teslatokens import (
+    -+    FLEET_NA_URL as FLEET_URL,
+    -     OWNER_API_URL as OWNER_URL,
+    -     add_home_vehicle,
+    -     fleet_token,
+    +     FLEET_NA_URL as FLEET_URL,
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: from tests.unit.teslatokens import (
+          new_api,
+          no_threads,
+          owner_token,
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestRefusalHint:
+              assert len(self.refusals(caplog)) == 1
+      
+      
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+    +             OWNER_URL[: -len("vehicles")] + "products",
+    +             json={
+    +                 "count": 1,
+    +-                "response": [
+    +-                    {"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"}
+    +-                ],
+    ++                "response": [{"id": 1, "vin": "5YJ3E1EA1KF000001", "display_name": "Car"}],
+    +             },
+    +         )
+    +         assert api.loadVehicleList() is True
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachModuleOnce:
+    +     def make(self, settings=None, ha=None):
+    +         from tests.unit.test_teslaapi_registry import api_with_registry
+    +         from TWCManager.TWCMaster import TWCMaster
+    ++        from TWCManager.Vehicle.Providers import Capability as C
+    +         from TWCManager.Vehicle.Providers.Order import ProviderOrder
+    +         from TWCManager.Vehicle.Providers.Provider import Provider
+      
+              api, reg = api_with_registry()
+              api.storeToken(owner_token())
+    +-        add_home_vehicle(api, "required")
+     -        assert api.readOnly is True
+     +        # No Fleet token: no car is commanded through Fleet
+     +        assert api.slotFor("command") is None
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+              ble = Mock()
+      
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachModuleOnce:
+    +         assert not ble.updateChargeAtHome.called
+    + 
+    +     def test_home_assistant_refreshes_once_alongside_teslaapi(self, no_threads):
+    +-        # HA is refreshed even when TeslaAPI holds cars
+    ++        # 12b deleted-test GAP: HA is refreshed even when TeslaAPI holds cars
+    +         ha = Mock()
+    +         ha.enabled.return_value = True
+              ble, api = self.make(ha=ha)
+    -         assert ha.updateChargeAtHome.call_count == 1
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachModuleOnce:
+              assert api.updateChargeAtHome.call_count == 1
+    -+
+    -+
+    + 
+    + 
+    +-# What Tesla answers a REST command for a car that needs signed commands.
+     +# Owner API commands per vehicle (#659)
+     +
+     +VIN = "5YJ3E1EA1KF000001"
+     +VIN2 = "5YJSA7E20JF000002"
+    -+VCP_403 = {
+    -+    "response": None,
+    -+    "error": "Tesla Vehicle Command Protocol required, please refer to the "
+    -+    "documentation here: https://developer.tesla.com/docs/fleet-api",
+    -+}
+    -+
+    -+
+    + VCP_403 = {
+    +     "response": None,
+    +     "error": "Tesla Vehicle Command Protocol required, please refer to the "
+    +     "documentation here: https://developer.tesla.com/docs/fleet-api",
+    +-    "error_description": "",
+    +-}
+    +-ACCEPTED = {"response": {"result": True, "reason": ""}}
+    +-ONLINE = {"response": {"state": "online"}}
+    +-
+    +-
+    +-def tesla_provider(api):
+    +-    """Either of TeslaAPI's providers: the command methods are shared and
+    +-    send through commandSlotFor, the slot that may command the car."""
+    +-    return api.providers()[0]
+    +-
+    +-
+    +-def car(vehicle):
+    +-    """TeslaAPI's own record for a listed registry vehicle."""
+    +-    return vehicle.attachment("TeslaAPI")
+    +-
+    +-
+    +-# Each owner-command path: the endpoint under /5YJ3E1EA1KF000001 and how to send it.
+    +-COMMANDS = {
+    +-    "set_charging_amps": (
+    +-        "/command/set_charging_amps",
+    +-        lambda api, vehicle: tesla_provider(api).setAmps(vehicle.vin, 10),
+    +-    ),
+    +-    "set_charge_limit": (
+    +-        "/command/set_charge_limit",
+    +-        lambda api, vehicle: tesla_provider(api).setChargeLimit(vehicle.vin, 80),
+    +-    ),
+    +-    "charge_start": (
+    +-        "/command/charge_start",
+    +-        lambda api, vehicle: tesla_provider(api).startCharging(vehicle.vin),
+    +-    ),
+    +-    "charge_stop": (
+    +-        "/command/charge_stop",
+    +-        lambda api, vehicle: tesla_provider(api).stopCharging(vehicle.vin),
+    +-    ),
+    +-    "wake_up": (
+    +-        "/wake_up",
+    +-        lambda api, vehicle: tesla_provider(api).wake(vehicle.vin),
+    +-    ),
+    + }
+    + 
+    + 
+    +-def prime(command, api, vehicle, requests_mock, state="asleep"):
+    +-    """A wake first asks the free online state and goes out only for a car
+    +-    not known to be online whose charge need is live and past its grace; a
+    +-    stop asks it too and goes out to an online car."""
+    +-    if command == "charge_stop":
+    +-        for base in (OWNER_URL, FLEET_URL):
+    +-            requests_mock.get(base + "/" + vehicle.vin, json=ONLINE)
+    +-        return
+    +-    if command != "wake_up":
+    +-        return
+    +-    car(vehicle).lastAPIAccessTime = 0
+    +-    car(vehicle).firstChargeNeededTime = 1
+    +-    car(vehicle).lastChargeNeededTime = time.time()
+    +-    for base in (OWNER_URL, FLEET_URL):
+    +-        requests_mock.get(base + "/" + vehicle.vin, json={"response": {"state": state}})
+     +def provider(api, name):
+     +    return [p for p in api.providers() if p.name == name][0]
+    -+
+    -+
+    + 
+    + 
+    +-class Refusal:
+    +-    """Matches an Outcome whose kind is one of the given kinds."""
+     +def listed(api, i=0):
+     +    # (registry vehicle, CarApiState) of the i-th listed car, VIN order
+     +    return api.registry.attached("TeslaAPI")[i]
+    -+
+    -+
+    + 
+    +-    def __init__(self, *kinds):
+    +-        self.kinds = kinds
+    + 
+    +-    def __eq__(self, other):
+    +-        return getattr(other, "kind", None) in self.kinds
+    +-
+    +-
+    +-REFUSED_OUTCOME = Refusal(REFUSED)
+     +def owner_api_with(signing, vin=VIN, name="Car"):
+     +    api = new_api()
+     +    api.storeToken(owner_token())
+     +    add_home_vehicle(api, command_signing=signing, vin=vin, name=name)
+     +    return api
+    -+
+    -+
+    + 
+    +-# What each command path returns when Tesla refuses it (and latches the
+    +-# car), then when it is refused locally afterwards. The reconciler treats a
+    +-# REFUSED outcome as excluding the provider.
+    +-REFUSED_RETURNS = {command: (REFUSED_OUTCOME, REFUSED_OUTCOME) for command in COMMANDS}
+    + 
+    +-# Owner API answers that mean the car needs signed commands: HTTP 403 with
+    +-# or without a JSON body, or the Vehicle Command Protocol error.
+    +-SIGNING_REFUSALS = {
+    +-    "403 VCP json": {"status_code": 403, "json": VCP_403},
+    +-    "403 empty": {"status_code": 403, "text": ""},
+    +-    "403 text": {"status_code": 403, "text": "Forbidden"},
+    +-    "403 html": {"status_code": 403, "text": "<html><body>403</body></html>"},
+    +-}
+     +def bearer(request):
+     +    return request.headers["Authorization"][len("Bearer ") :]
+    -+
+    -+
+    + 
+    + 
+    +-# What the Owner API answers once Tesla has stopped taking commands on it.
+    +-FLEETAPI_ONLY = {
+    +-    "response": None,
+    +-    "error": "Endpoint is only available on fleetapi. Visit "
+    +-    "https://developer.tesla.com/docs for more info",
+    +-    "error_description": "",
+    +-}
+    +-
+    +-# Owner API answers that mean it no longer takes commands for the car:
+    +-# HTTP 410 or 412, or the "only available on fleetapi" error, whatever
+    +-# the status.
+    +-RETIRED_REFUSALS = {
+    +-    "410": {"status_code": 410, "text": ""},
+    +-    "412": {"status_code": 412, "text": ""},
+    +-    "412 fleetapi json": {"status_code": 412, "json": FLEETAPI_ONLY},
+    +-    "200 fleetapi json": {"status_code": 200, "json": FLEETAPI_ONLY},
+    +-    "200 fleetapi text": {
+    +-        "status_code": 200,
+    +-        "text": "Endpoint is only available on fleetapi.",
+    +-    },
+    +-}
+     +def mock_owner_car(requests_mock, vin=VIN, status=200, body=None, state="online"):
+     +    # The free online check and every command answer for one car
+     +    requests_mock.get(OWNER_URL + "/" + vin, json={"response": {"state": state}})
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        status_code=status,
+     +        json=body or {"response": {"result": True, "reason": ""}},
+     +    )
+    -+
+    -+
+    + 
+    +-ALL_REFUSALS = {**SIGNING_REFUSALS, **RETIRED_REFUSALS}
+    + 
+    +-VEHICLE_DATA = {
+    +-    "response": {
+    +-        "drive_state": {"latitude": 37.0, "longitude": -122.0},
+    +-        "charge_state": {"battery_level": 55, "charge_limit_soc": 80},
+    +-        "vehicle_state": {"vehicle_name": "Car"},
+    +-    }
+    +-}
+     +def posts(requests_mock):
+     +    return [q for q in requests_mock.request_history if q.method == "POST"]
+    -+
+    -+
+    + 
+    + 
+    +-def reply_for(command):
+    +-    return ONLINE if command == "wake_up" else ACCEPTED
+     +class TestOffCarCommandsThroughOwner:
+     +    # command_signing "off": every command goes to the Owner API with the
+     +    # Owner token, through the OwnerAPI provider
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        ]
+     +        assert bearer(sent.last_request) == api.ownerSlot.accessToken
+     +        assert no_error_recorded(api)
+    -+
+    + 
+     +    def test_wake_goes_to_owner_api(self, no_threads, requests_mock, monkeypatch):
+     +        import TWCManager.Vehicle.TeslaAPI as teslaapi
+    -+
+    + 
+    +-@pytest.fixture
+    +-def no_sleep(monkeypatch):
+    +-    import TWCManager.Vehicle.TeslaAPI as teslaapi
+     +        monkeypatch.setattr(teslaapi.time, "sleep", lambda s: None)
+     +        api = owner_api_with("off")
+     +        wake = mock_owner_car(
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert no_error_recorded(api)
+     +        assert vehicle.claims["OwnerAPI"].commands is False
+     +        assert vehicle.tier == "observed"
+    -+
+    + 
+    +-    monkeypatch.setattr(teslaapi.time, "sleep", lambda secs: None)
+     +    def test_off_must_match_exactly(self, no_threads):
+     +        for signing in ("Off", "OFF", " off", "false", False, 0, ""):
+     +            api = owner_api_with(signing)
+     +            assert not api.canCommand(api.registry.get(VIN), api.ownerSlot)
+    -+
+    + 
+     +    def infos(self, caplog):
+     +        return [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    -+
+    + 
+    +-def add_car(api, command_signing, vin="5YJ3E1EA1KF000001", name="Car", id=1):
+    +-    """A listed car at home, as its registry vehicle."""
+    +-    return add_home_vehicle(api, command_signing, vin=vin, name=name, id=id)
+     +    def test_required_car_is_named_once(self, no_threads, requests_mock, caplog):
+     +        caplog.set_level(logging.INFO)
+     +        api = owner_api_with("required", name="Model 3")
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +            "the TeslaBLE module."
+     +        ]
+     +        assert requests_mock.call_count == 0 and no_error_recorded(api)
+    -+
+    + 
+     +    @pytest.mark.parametrize("signing", [None, "weird"])
+     +    def test_unknown_car_is_named_once(self, no_threads, caplog, signing):
+     +        caplog.set_level(logging.INFO)
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        api.storeToken(fleet_token())
+     +        provider(api, "OwnerAPI").ready(api.registry.get(VIN), C.SET_AMPS)
+     +        assert not [m for m in self.infos(caplog) if "Model 3" in m]
+    -+
+    + 
+    +-@pytest.fixture
+    +-def owner_car(no_threads, no_sleep):
+    +-    def make(command_signing, fleet=None):
+     +    def test_owner_token_with_no_cars_listed_is_not_read_only(self, no_threads):
+     +        # Whether it can command is known only once the cars are listed
+    -+        api = new_api()
+    -+        api.storeToken(owner_token())
+    +         api = new_api()
+    +         api.storeToken(owner_token())
+    +-        if fleet:
+    +-            api.storeToken(fleet)
+    +-        return api, add_car(api, command_signing)
+    +-
+    +-    return make
+    +-
+    +-
+    +-def order_over(api):
+    +-    """The provider order the reconciler walks: TeslaAPI's providers, then a
+    +-    fallback provider ranked after them, as HomeAssistant is."""
+    +-    from TWCManager.Vehicle.Providers.Order import ProviderOrder
+    +-    from TWCManager.Vehicle.Providers.Provider import Provider
+    +-
+    +-    class Fallback(Provider):
+    +-        name, rank, local = "Fallback", 6, False
+    +-
+    +-        def declarations(self):
+    +-            return {c: C.Declaration(C.HA_BILLED) for c in C.COMMANDS}
+    +-
+    +-        def ready(self, vehicle, capability):
+    +-            return True
+     +        assert api.readOnly is False and api.ownerTokenOnly is True
+    -+
+    + 
+    +-    master = api.master
+    +-    master.vehicleRegistry = api.registry
+    +-    order = ProviderOrder(master)
+    +-    for p in api.providers() + [Fallback()]:
+    +-        order.register(p)
+    +-    return order
+     +    def test_module_hint_only_when_no_car_can_command(self, no_threads, caplog):
+     +        caplog.set_level(logging.INFO)
+     +        api = owner_api_with("off")
+     +        provider(api, "FleetAPI").available(C.SET_AMPS)
+     +        assert not [m for m in self.infos(caplog) if "Tesla API is read-only" in m]
+    -+
+    -+
+    + 
+    + 
+    +-def amps_candidates(api, vehicle):
+    +-    """Who may set this car's amps, in order."""
+    +-    return [p.name for p in order_over(api).candidates(vehicle, C.SET_AMPS)]
+     +class TestMixedFleet:
+     +    # One "off" car and one "required" car on one Owner token: each decided
+     +    # on its own
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +            OWNER_URL + "/" + VIN + "/command/set_charging_amps"
+     +        ]
+     +        assert no_error_recorded(api) and requiredCar.lastErrorTime == 0
+    -+
+    -+
+    + 
+    + 
+    +-class TestOwnerCommandsForUnsignedVehicles:
+    +-    @pytest.mark.parametrize("command", list(COMMANDS))
+    +-    def test_sent_to_owner_api_with_owner_token(
+    +-        self, owner_car, requests_mock, command
+    +-    ):
+    +-        api, vehicle = owner_car("off")
+    +-        suffix, send = COMMANDS[command]
+    +-        prime(command, api, vehicle, requests_mock)
+     +class TestBothTokens:
+     +    def test_off_car_commands_through_owner(self, no_threads, requests_mock):
+     +        # The provider order decides (OwnerAPI ranks before FleetAPI in the
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        sent = mock_owner_car(requests_mock)
+     +        assert owner.setAmps(VIN, 10) == Outcome(DONE)
+     +        assert bearer(sent.last_request) == api.ownerSlot.accessToken
+    -+        cmd = requests_mock.post(
+    +         cmd = requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, json=reply_for(command)
+     +            re.compile(re.escape(FLEET_URL + "/" + VIN) + "/command/.*"),
+     +            json={"response": {"result": True, "reason": ""}},
+    -+        )
+    +         )
+     +        assert fleet.setAmps(VIN, 10) == Outcome(DONE)
+     +        assert bearer(cmd.last_request) == api.fleetSlot.accessToken
+     +        assert sent.call_count == 1 and cmd.call_count == 1
+    -+
+    + 
+     +    @pytest.mark.parametrize("signing", ["required", None, "weird"])
+     +    def test_other_cars_command_through_fleet_only(
+     +        self, no_threads, requests_mock, caplog, signing
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert owner.wake(VIN) == Outcome(REFUSED, "no command token")
+     +        assert requests_mock.call_count == 0
+     +        # Fleet commands it: not read-only, so no per-car line
+    -+        assert api.readOnly is False
+    +         assert api.readOnly is False
+    +-        assert api.readOnlyFor(vehicle) is False
+    +-        send(api, vehicle)
+     +        assert not [r for r in caplog.records if "read-only" in r.getMessage()]
+    -+
+    + 
+     +    def test_fleet_token_without_command_scope_leaves_owner(
+     +        self, no_threads, requests_mock
+     +    ):
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        cmd = mock_owner_car(requests_mock, status=403, body=VCP_403)
+     +        owner = provider(api, "OwnerAPI")
+     +        assert owner.setAmps(VIN, 10).kind == REFUSED
+    -+        assert cmd.call_count == 1
+    +         assert cmd.call_count == 1
+    +-        bearer = cmd.last_request.headers["Authorization"]
+    +-        assert bearer == "Bearer " + api.ownerSlot.accessToken
+     +        assert car.ownerCommandsRefused is True
+    -+        assert no_error_recorded(api)
+    +         assert no_error_recorded(api)
+    +-
+    +-    def test_read_pause_does_not_block_owner_commands(self, owner_car, requests_mock):
+    +-        api, vehicle = owner_car("off")
+    +-        api.ownerSlot.pause()
+    +-        cmd = requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps", json=ACCEPTED
+    +-        )
+    +-        assert tesla_provider(api).setAmps(vehicle.vin, 10) == Outcome(DONE)
+     +        assert "command" not in api.ownerSlot.refusedPurposes
+     +        assert api.ownerSlot.usable("read")
+     +        # This car drops out of the Owner walk; the other "off" car does not
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        # A second command makes no request
+     +        assert owner.setAmps(VIN, 10) == Outcome(REFUSED, "no command token")
+     +        assert owner.wake(VIN) == Outcome(REFUSED, "no command token")
+    -+        assert cmd.call_count == 1
+    +         assert cmd.call_count == 1
+    +-
+    +-    def test_cleared_owner_slot_blocks(self, owner_car, any_http):
+    +-        api, vehicle = owner_car("off")
+    +-        api.ownerSlot.clear()
+    +-        assert api.readOnlyFor(vehicle) is True
+    +-        assert tesla_provider(api).setAmps(vehicle.vin, 10) == REFUSED_OUTCOME
+    +-        assert any_http.call_count == 0
+    +-
+    +-
+    +-class TestRefusedVehicles:
+    +-    @pytest.mark.parametrize(
+    +-        "signing", ["required", None, "weird"], ids=["required", "missing", "unknown"]
+    +-    )
+    +-    @pytest.mark.parametrize("command", list(COMMANDS))
+    +-    def test_refused_locally(self, owner_car, any_http, signing, command):
+    +-        api, vehicle = owner_car(signing)
+    +-        suffix, send = COMMANDS[command]
+    +-
+    +-        assert api.readOnly is True
+    +-        assert api.readOnlyFor(vehicle) is True
+    +-        assert send(api, vehicle) in (False, REFUSED_OUTCOME)
+    +-
+    +-        assert any_http.call_count == 0
+     +        warned = [
+     +            r.getMessage()
+     +            for r in caplog.records
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        wake = mock_owner_car(requests_mock, state="asleep", status=403, body=VCP_403)
+     +        assert provider(api, "OwnerAPI").wake(VIN).kind == REFUSED
+     +        assert wake.call_count == 1 and car.ownerCommandsRefused is True
+    -+        assert no_error_recorded(api)
+    -+
+    +         assert no_error_recorded(api)
+    + 
+    +-
+    +-@pytest.fixture
+    +-def mixed_fleet(no_threads, no_sleep):
+    +-    """Owner token only; 5YJ3E1EA1KF000001 takes Owner API commands, 5YJ3E1EA1KF000002 needs signing."""
+    +-    api = new_api()
+    +-    api.storeToken(owner_token())
+    +-    unsigned = add_car(api, "off")
+    +-    signed = add_car(api, "required", vin="5YJ3E1EA1KF000002", name="Signed", id=2)
+    +-    return api, unsigned, signed
+    +-
+    +-
+    +-class TestMixedFleet:
+    +-    def test_each_vehicle_decided_separately(self, mixed_fleet, requests_mock):
+    +-        api, unsigned, signed = mixed_fleet
+    +-        amps = requests_mock.post(
+    +-            re.compile(r".*/command/set_charging_amps"), json=ACCEPTED
+    +-        )
+    +-        provider = tesla_provider(api)
+    +-
+    +-        assert api.readOnly is False
+    +-        assert api.readOnlyFor(unsigned) is False
+    +-        assert api.readOnlyFor(signed) is True
+    +-        assert provider.setAmps(signed.vin, 10) == REFUSED_OUTCOME
+    +-        assert amps.call_count == 0
+    +-        assert provider.setAmps(unsigned.vin, 10) == Outcome(DONE)
+    +-        assert amps.call_count == 1
+    +-        assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    +-        assert no_error_recorded(api)
+    +-        assert car(signed).lastErrorTime == 0
+    +-
+    +-    def test_stop_reaches_only_the_unsigned_car(self, mixed_fleet, requests_mock):
+    +-        api, unsigned, signed = mixed_fleet
+    +-        requests_mock.get(re.compile(r".*/vehicles/5YJ3E1EA1KF00000[12]$"), json=ONLINE)
+    +-        stop = requests_mock.post(re.compile(r".*/command/charge_stop"), json=ACCEPTED)
+    +-        provider = tesla_provider(api)
+    +-
+    +-        # The signed car is refused without a request, so the reconciler
+    +-        # tries the next provider for it.
+    +-        assert provider.stopCharging(signed.vin) == REFUSED_OUTCOME
+    +-        assert stop.call_count == 0
+    +-        assert provider.stopCharging(unsigned.vin) == Outcome(DONE)
+    +-        assert stop.call_count == 1
+    +-        assert (
+    +-            stop.last_request.url
+    +-            == OWNER_URL + "/5YJ3E1EA1KF000001/command/charge_stop"
+     +    def test_read_still_works(self, no_threads, requests_mock):
+     +        api = owner_api_with("off")
+     +        mock_owner_car(requests_mock, status=403, body=VCP_403)
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +                    "vehicle_state": {"vehicle_name": "Car"},
+     +                }
+     +            },
+    -+        )
+    +         )
+    +-        assert car(signed).lastErrorTime == 0
+    +-        assert no_error_recorded(api)
+    +-
+    +-    def test_order_leaves_out_tesla_api_for_the_signed_car(self, mixed_fleet, any_http):
+    +-        api, unsigned, signed = mixed_fleet
+    +-        assert amps_candidates(api, signed) == ["Fallback"]
+    +-        assert any_http.call_count == 0
+     +        vehicle = api.registry.get(VIN)
+     +        assert api.update_vehicle_data(vehicle) is True
+     +        assert data.call_count == 1 and vehicle.value("batteryLevel") == 55
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert first == Outcome(REFUSED, "signing required")
+     +        assert sent.call_count == 1 and car.ownerCommandsRefused is True
+     +        assert "command" not in api.ownerSlot.refusedPurposes
+    -+        assert no_error_recorded(api)
+    +         assert no_error_recorded(api)
+    +-        assert car(signed).lastErrorTime == 0
+    +-
+    +-    def test_order_puts_owner_api_first_for_the_unsigned_car(self, mixed_fleet):
+    +-        api, unsigned, signed = mixed_fleet
+    +-        assert amps_candidates(api, unsigned) == ["OwnerAPI", "Fallback"]
+    +-
+    +-    def test_endpoint_read_only_per_vehicle(self, mixed_fleet):
+    +-        from TWCManager.EVSEInstance.VehicleEndpoint import VehicleEndpoint
+    +-        from TWCManager.Vehicle.Providers.Order import ProviderOrder
+     +        assert owner.setChargeLimit(VIN, 80) == Outcome(REFUSED, "no command token")
+     +        assert sent.call_count == 1
+    -+
+    + 
+    +-        api, unsigned, signed = mixed_fleet
+    +-        order = ProviderOrder(api.master)
+    +-        for p in api.providers():
+    +-            order.register(p)
+    +-        assert VehicleEndpoint(unsigned, order, api.master).isReadOnly is False
+    +-        assert VehicleEndpoint(signed, order, api.master).isReadOnly is True
+     +    def test_fleet_403_keeps_its_handling(self, no_threads, requests_mock):
+     +        # Only the Owner slot latches a car; a Fleet 403 is still Fleet's
+     +        api = owner_api_with("off")
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        vehicle, car = listed(api)
+     +        assert provider(api, "FleetAPI").setAmps(VIN, 10) == Outcome(REFUSED, "403")
+     +        assert car.ownerCommandsRefused is False
+    -+
+    -+
+    + 
+    + 
+    +-class TestOwnerCommandRefusedByTesla:
+    +-    """A car listed with command_signing "off" whose Owner API command Tesla
+    +-    refuses anyway: 403 or "Vehicle Command Protocol required" (needs signed
+    +-    commands), or 410, 412 or "only available on fleetapi" (the Owner API
+    +-    no longer takes commands). Either latches the car read-only."""
+     +FLEETAPI_ONLY = {
+     +    "response": None,
+     +    "error": "Endpoint is only available on fleetapi. Visit "
+     +    "https://developer.tesla.com/docs for more info",
+     +}
+     +RETIRED = Outcome(REFUSED, "owner commands retired")
+    -+
+    -+
+    + 
+    +-    @pytest.mark.parametrize("refusal", list(ALL_REFUSALS))
+    +-    @pytest.mark.parametrize("command", list(COMMANDS))
+    +-    def test_latches_without_error_backoff(
+    +-        self, owner_car, requests_mock, command, refusal
+    +-    ):
+    +-        api, vehicle = owner_car("off")
+    +-        suffix, send = COMMANDS[command]
+    +-        first, after = REFUSED_RETURNS[command]
+    +-        prime(command, api, vehicle, requests_mock)
+    +-        cmd = requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001" + suffix, **ALL_REFUSALS[refusal]
+    +-        )
+    + 
+    +-        assert send(api, vehicle) == first
+     +class TestOwnerCommandsRetired:
+     +    # Tesla stops taking Owner API commands (410 Gone, or "only available on
+     +    # fleetapi"): a token-wide signal, so the Owner token sends no command or
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        car.firstChargeNeededTime = time.time() - 600
+     +        car.lastChargeNeededTime = time.time()
+     +        return vehicle, car
+    -+
+    + 
+    +-        assert cmd.call_count == 1
+    +-        assert car(vehicle).ownerCommandsRefused is True
+     +    @pytest.mark.parametrize(
+     +        "status,body,call",
+     +        [
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert sent.call_count == 1
+     +        assert "command" in api.ownerSlot.refusedPurposes
+     +        assert car.ownerCommandsRefused is False
+    -+        assert no_error_recorded(api)
+    +         assert no_error_recorded(api)
+    +-        assert api.readOnlyFor(vehicle) is True
+     +        assert car.delayNextWakeAttempt == 0
+     +        # Every car leaves the Owner walk; nothing more is sent
+     +        for each in (vehicle, other):
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert owner.setAmps(VIN2, 10) == Outcome(REFUSED, "no command token")
+     +        assert owner.wake(VIN) == Outcome(REFUSED, "no command token")
+     +        assert sent.call_count == 1
+    -+        assert api.readOnly is True
+    +         assert api.readOnly is True
+    +-
+    +-        assert send(api, vehicle) == after
+    +-        assert cmd.call_count == 1
+    +-        assert no_error_recorded(api)
+    +-
+    +-        # Reads still run on the Owner token (of a car known awake: a read
+    +-        # of an asleep car is never attempted).
+     +        # One line stands for every car's
+     +        said = [
+     +            r.getMessage()
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert "no longer accepts Owner API commands" in said[0]
+     +        assert "replaced" not in said[0]
+     +        # Reads keep the token
+    -+        assert api.ownerSlot.usable("read")
+    -+        data = requests_mock.get(
+    +         assert api.ownerSlot.usable("read")
+    +-        car(vehicle).lastAPIAccessTime = time.time()
+    +-        car(vehicle).firstWakeAttemptTime = 0
+    +         data = requests_mock.get(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/vehicle_data", json=VEHICLE_DATA
+     +            OWNER_URL + "/" + VIN + "/vehicle_data",
+     +            json={
+     +                "response": {
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +                    "vehicle_state": {"vehicle_name": "Car"},
+     +                }
+     +            },
+    -+        )
+    -+        assert api.update_vehicle_data(vehicle) is True
+    +         )
+    +         assert api.update_vehicle_data(vehicle) is True
+    +-        assert data.call_count == 1
+     +        assert data.call_count == 1 and vehicle.value("batteryLevel") == 55
+     +
+     +    def test_retired_on_http_200(self, no_threads, requests_mock):
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert sent.call_count == 1
+     +        assert "command" in api.ownerSlot.refusedPurposes
+     +        assert no_error_recorded(api)
+    -+
+    + 
+    +-    @pytest.mark.parametrize(
+    +-        "refusal,cause",
+    +-        [(name, "signing") for name in SIGNING_REFUSALS]
+    +-        + [(name, "retired") for name in RETIRED_REFUSALS],
+    +-    )
+    +-    def test_warning_names_the_cause(
+    +-        self, owner_car, requests_mock, caplog, refusal, cause
+    +-    ):
+    +-        caplog.set_level(logging.INFO)
+    +-        api, vehicle = owner_car("off")
+     +    @pytest.mark.parametrize("body", [{"response": None}, FLEETAPI_ONLY])
+     +    def test_fleet_410_keeps_its_handling(self, no_threads, requests_mock, body):
+     +        # A Fleet 410 stays a plain, retryable error: nothing is retired
+     +        api = owner_api_with("off")
+     +        api.storeToken(fleet_token())
+    -+        requests_mock.post(
+    +         requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    +-            **ALL_REFUSALS[refusal]
+     +            re.compile(re.escape(FLEET_URL + "/" + VIN) + "/command/.*"),
+     +            status_code=410,
+     +            json=body,
+    -+        )
+    +         )
+    +-        tesla_provider(api).setAmps(vehicle.vin, 10)
+     +        assert provider(api, "FleetAPI").setAmps(VIN, 10) == Outcome(ERROR, "410")
+     +        assert api.fleetSlot.refusedPurposes == set()
+     +        assert api.ownerSlot.refusedPurposes == set()
+    -+
+    + 
+    +-        warnings = [
+    +-            r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+    +-        ]
+    +-        assert len(warnings) == 1
+    +-        assert "Car" in warnings[0]
+    +-        assert "TeslaBLE" in warnings[0]
+    +-        if cause == "signing":
+    +-            assert "needs signed commands" in warnings[0]
+    +-            assert "no longer" not in warnings[0]
+    +-        else:
+    +-            assert "Owner API no longer takes commands" in warnings[0]
+    +-            assert "signed commands" not in warnings[0]
+    +-
+    +-        # The per-car read-only line, logged again on a state change, gives
+    +-        # the same cause.
+    +-        car(vehicle).refusalLoggedAt = None
+    +-        tesla_provider(api).setAmps(vehicle.vin, 12)
+    +-        lines = [
+     +    def test_per_car_line_names_the_token(self, no_threads, requests_mock, caplog):
+     +        # Finding 2: the per-car line says the Owner token was refused, not
+     +        # what the car's signing says; and it is logged again on the change
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        for _ in range(3):
+     +            assert not owner.ready(vehicle, C.SET_AMPS)
+     +        said = [
+    -+            r.getMessage()
+    -+            for r in caplog.records
+    +             r.getMessage()
+    +             for r in caplog.records
+    +-            if r.levelno == logging.INFO and "read-only for Car" in r.getMessage()
+     +            if r.levelno == logging.INFO and "read-only for Old X" in r.getMessage()
+    -+        ]
+    +         ]
+    +-        assert len(lines) == 1
+    +-        if cause == "signing":
+    +-            assert "command_signing: off" in lines[0]
+    +-        else:
+    +-            assert "Owner API no longer takes commands" in lines[0]
+    +-
+    +-    def test_wake_from_the_reconciler_records_no_error(self, owner_car, requests_mock):
+    +-        api, vehicle = owner_car("off")
+    +-        car(vehicle).lastAPIAccessTime = 0  # not known to be awake
+    +-        # A live charge need whose pre-wake hold is long over
+    +-        car(vehicle).firstChargeNeededTime = 1
+    +-        car(vehicle).lastChargeNeededTime = time.time()
+    +-        requests_mock.get(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001", json={"response": {"state": "asleep"}}
+    +-        )
+    +-        wake = requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/wake_up", status_code=403, json=VCP_403
+    +-        )
+     +        assert len(said) == 2
+     +        assert "command_signing: required" in said[0]
+     +        assert "Tesla refused commands with the Owner API token" in said[1]
+     +        assert "command_signing" not in said[1]
+     +
+    -+
+    + 
+    +-        assert tesla_provider(api).wake(vehicle.vin) == REFUSED_OUTCOME
+     +class TestThroughTheWalk:
+     +    # The reconciler's real walk over the real TeslaAPI providers, with a
+     +    # lower-priority provider behind them
+     +    def make(self, *signings, fleet=False):
+     +        from tests.unit.reconcile_helpers import ScriptedProvider
+     +        from tests.unit.test_limit_reconciler import setup
+    -+
+    + 
+    +-        assert wake.call_count == 1
+    +-        assert car(vehicle).ownerCommandsRefused is True
+     +        m, r, v, c = setup(clock=False)
+     +        api = new_api(master=m)
+     +        api.storeToken(owner_token())
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert sent == [OWNER_URL + "/" + VIN + "/command/set_charge_limit"]
+     +        # The "required" car got no request from TeslaAPI and fell through
+     +        assert last.calls == [("setChargeLimit", VIN2, 50)]
+    -+        assert no_error_recorded(api)
+    -+
+    +         assert no_error_recorded(api)
+    + 
+    +-    @pytest.mark.parametrize("refusal", list(ALL_REFUSALS))
+    +-    def test_latched_car_leaves_the_order_and_reads_still_work(
+    +-        self, owner_car, requests_mock, refusal
+    +-    ):
+    +-        api, vehicle = owner_car("off")
+    +-        cmd = requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    +-            **ALL_REFUSALS[refusal]
+    +-        )
+    +-        assert amps_candidates(api, vehicle) == ["OwnerAPI", "Fallback"]
+     +    def test_403_falls_through(self, no_threads, requests_mock):
+     +        from TWCManager.Vehicle.Reconcile.Desired import CHARGE_LIMIT
+    -+
+    + 
+    +-        assert tesla_provider(api).setAmps(vehicle.vin, 10) == REFUSED_OUTCOME
+     +        m, r, api, last = self.make("off")
+     +        cmd = mock_owner_car(requests_mock, status=403, body=VCP_403)
+     +        self.limit(m, r, VIN)
+    -+        assert cmd.call_count == 1
+    +         assert cmd.call_count == 1
+    +-
+    +-        # Latched: the next walk leaves TeslaAPI out without an HTTP call.
+    +-        assert amps_candidates(api, vehicle) == ["Fallback"]
+    +-        assert requests_mock.call_count == 1
+     +        assert listed(api)[1].ownerCommandsRefused is True
+    -+        assert no_error_recorded(api)
+    +         assert no_error_recorded(api)
+     +        # The Owner provider drops out for this car; the next one stays
+     +        v = m.vehicleRegistry.get(VIN)
+     +        able = [p.name for p in m.providerOrder.candidates(v, C.SET_CHARGE_LIMIT)]
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        rec = m.desired.record(VIN, CHARGE_LIMIT)
+     +        assert rec.paidSends == 1 and rec.lastProvider == "Fallback"
+     +        assert cmd.call_count == 1 and no_error_recorded(api)
+    -+
+    + 
+    +-        data = requests_mock.get(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/vehicle_data", json=VEHICLE_DATA
+    +-        )
+    +-        assert api.update_vehicle_data(vehicle) is True
+    +-        assert data.call_count == 1
+    +-
+    +-    # Fleet API answers to a command keep today's handling: Tesla is
+    +-    # refusing the Fleet token, not the Owner API, so nothing latches.
+    +-    FLEET_REFUSALS = {
+    +-        "403 VCP json": {"status_code": 403, "json": VCP_403},
+    +-        "410": {"status_code": 410, "json": {"response": None, "error": "gone"}},
+    +-        "412 fleetapi json": {"status_code": 412, "json": FLEETAPI_ONLY},
+    +-    }
+    +-    # A Fleet refusal is REFUSED (403, 412) or ERROR (410); a refused wake is
+    +-    # UNREACHABLE, so Fleet still carries commands that need no wake
+    +-    FLEET_REFUSED = Refusal("refused", "error", "unreachable")
+    +-
+    +-    @pytest.mark.parametrize("refusal", list(FLEET_REFUSALS))
+    +-    @pytest.mark.parametrize("command", list(COMMANDS))
+    +-    def test_fleet_refusal_does_not_latch(
+    +-        self, owner_car, requests_mock, command, refusal
+    +-    ):
+    +-        api, vehicle = owner_car("off", fleet=fleet_token())
+    +-        suffix, send = COMMANDS[command]
+    +-        answer = self.FLEET_REFUSALS[refusal]
+    +-        # A stop first asks the free online state; an online car gets it
+    +-        requests_mock.get(OWNER_URL + "/5YJ3E1EA1KF000001", json=ONLINE)
+    +-        prime(command, api, vehicle, requests_mock)
+    +-        cmd = requests_mock.post(FLEET_URL + "/5YJ3E1EA1KF000001" + suffix, **answer)
+    +-
+    +-        assert send(api, vehicle) == self.FLEET_REFUSED
+    +-
+    +-        assert cmd.call_count >= 1
+    +-        assert car(vehicle).ownerCommandsRefused is False
+    +-        # The reconciler path retires a Fleet token Tesla refused (403, 412);
+    +-        # the Owner token then carries this car's commands
+    +-        if api.fleetSlot.usable("command"):
+    +-            assert api.commandSlotFor(vehicle) is api.fleetSlot
+    +-        else:
+    +-            assert api.commandSlotFor(vehicle) is api.ownerSlot
+    +-        assert api.readOnlyFor(vehicle) is False
+    +-
+    +-
+    +-class TestBothTokens:
+    +-    def test_fleet_carries_commands_for_unsigned_car(self, owner_car, requests_mock):
+    +-        api, vehicle = owner_car("off", fleet=fleet_token())
+    +-        amps = requests_mock.post(
+    +-            re.compile(r".*/command/set_charging_amps"), json=ACCEPTED
+    +-        )
+    +-
+    +-        assert api.commandSlotFor(vehicle) is api.fleetSlot
+    +-        tesla_provider(api).setAmps(vehicle.vin, 10)
+    +-
+    +-        assert amps.call_count == 1
+    +-        assert amps.last_request.url.startswith(FLEET_URL + "/5YJ3E1EA1KF000001/")
+    +-        bearer = amps.last_request.headers["Authorization"]
+    +-        assert bearer == "Bearer " + api.fleetSlot.accessToken
+    +-
+    +-    def test_owner_carries_commands_when_fleet_lacks_command_scope(
+    +-        self, owner_car, requests_mock
+    +-    ):
+    +-        api, vehicle = owner_car(
+    +-            "off", fleet=fleet_token(scp=["openid", "vehicle_device_data"])
+    +-        )
+    +-        amps = requests_mock.post(
+    +-            re.compile(r".*/command/set_charging_amps"), json=ACCEPTED
+    +-        )
+    +-
+    +-        assert api.commandSlotFor(vehicle) is api.ownerSlot
+    +-        tesla_provider(api).setAmps(vehicle.vin, 10)
+    +-        assert amps.last_request.url.startswith(OWNER_URL + "/5YJ3E1EA1KF000001/")
+    +-
+    +-    def test_fleet_carries_commands_for_signed_car(self, owner_car):
+    +-        api, vehicle = owner_car("required", fleet=fleet_token())
+    +-        assert api.commandSlotFor(vehicle) is api.fleetSlot
+    +-        assert api.readOnly is False
+    +-
+    +-
+    +-class TestVehiclesNotYetListed:
+    +-    """Whether an Owner token can command is only known once the vehicles
+    +-    are listed, and only a read path lists them (unless telemetry does), so
+    +-    TeslaAPI is not read-only while the list is empty."""
+    +-
+    +-    def test_owner_only_read_only_once_listed(self, no_threads):
+    +-        api = new_api()
+    +-        api.storeToken(owner_token())
+    +-        assert api.readOnly is False
+    +-        add_home_vehicle(api, "required")
+    +-        assert api.readOnly is True
+    +-
+    +-    def test_no_token_is_read_only_unlisted(self):
+    +-        assert new_api().readOnly is True
+    +-
+    +-    def test_command_without_vehicles_logs_no_error(self, no_threads, any_http, caplog):
+    +-        # The reconciler asks every cycle while the list is empty; that is
+    +-        # expected, not an error, and lists nothing itself.
+    +-        caplog.set_level(logging.DEBUG)
+    +-        api = new_api()
+    +-        api.storeToken(owner_token())
+     +    @pytest.mark.parametrize(
+     +        "status,body", [(410, {"response": None}), (412, FLEETAPI_ONLY)]
+     +    )
+     +    def test_retired_falls_through(self, no_threads, requests_mock, status, body):
+     +        from TWCManager.Vehicle.Reconcile.Desired import CHARGE_LIMIT
+    -+
+    + 
+     +        m, r, api, last = self.make("off")
+     +        cmd = mock_owner_car(requests_mock, status=status, body=body)
+     +        self.limit(m, r, VIN)
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        m.vehicleRegistry.get(VIN).observe("chargeLimit", 50, "TeslaAPI")
+     +        m.desired.set(VIN, CHARGE_LIMIT, 60, "policy")
+     +        m.desired.record(VIN, CHARGE_LIMIT).lastSentAt -= 60
+    -+        for _ in range(3):
+    +         for _ in range(3):
+    +-            assert tesla_provider(api).setAmps("5YJ3E1EA1KF000001", 10) == Outcome(
+    +-                UNSUPPORTED, "not listed"
+    +-            )
+    +-
+    +-        assert any_http.call_count == 0
+    +-        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    +-
+    +-    def test_listing_then_refuses_signed_car(self, no_threads, no_sleep, requests_mock):
+    +-        api = new_api()
+    +-        api.storeToken(owner_token())
+    +-        listing = requests_mock.get(
+    +-            OWNER_URL[: -len("vehicles")] + "products",
+    +-            json={
+    +-                "count": 1,
+    +-                "response": [
+    +-                    {
+    +-                        "id": 1,
+    +-                        "vin": "5YJ3E1EA1KF000001",
+    +-                        "display_name": "Car",
+    +-                        "command_signing": "required",
+    +-                    }
+    +-                ],
+    +-            },
+    +-        )
+    +-        posts = requests_mock.register_uri("POST", rm.ANY, json={})
+    +-
+    +-        assert api.loadVehicleList() is True
+    +-        assert tesla_provider(api).stopCharging("5YJ3E1EA1KF000001") == REFUSED_OUTCOME
+    +-
+    +-        assert listing.call_count == 1
+    +-        assert posts.call_count == 0
+    +-        assert api.readOnly is True
+     +            r.pass_()
+     +        assert cmd.call_count == 1
+     +        assert last.calls[-1] == ("setChargeLimit", VIN, 60)
+    -+        assert no_error_recorded(api)
+    -+
+    +         assert no_error_recorded(api)
+    + 
+     +    def fleet_car(self, requests_mock, vin=VIN):
+     +        requests_mock.get(FLEET_URL + "/" + vin, json={"response": {"state": "online"}})
+     +        return requests_mock.post(
+     +            re.compile(re.escape(FLEET_URL + "/" + vin) + "/command/.*"),
+     +            json={"response": {"result": True, "reason": ""}},
+     +        )
+    -+
+    + 
+    +-class TestPerVehicleRefusalLogging:
+    +-    def lines(self, caplog, text):
+    +-        return [
+    +-            r.getMessage()
+    +-            for r in caplog.records
+    +-            if r.levelno >= logging.INFO and text in r.getMessage()
+     +    def test_both_tokens_go_to_owner(self, no_threads, requests_mock):
+     +        # The provider order decides: OwnerAPI ranks first, and nothing is
+     +        # sent with the Fleet token
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        self.limit(m, r, VIN)
+     +        assert [q.url for q in posts(requests_mock)] == [
+     +            OWNER_URL + "/" + VIN + "/command/set_charge_limit"
+    -+        ]
+    +         ]
+     +        assert bearer(sent.last_request) == api.ownerSlot.accessToken
+     +        assert cmd.call_count == 0 and last.calls == []
+    -+
+    + 
+    +-    def test_required_car_logged_once_with_the_fix(self, owner_car, any_http, caplog):
+    +-        caplog.set_level(logging.INFO)
+    +-        api, vehicle = owner_car("required")
+    +-        provider = tesla_provider(api)
+    +-        provider.setAmps(vehicle.vin, 10)
+    +-        provider.setAmps(vehicle.vin, 12)
+    +-        provider.wake(vehicle.vin)
+    +-        provider.startCharging(vehicle.vin)
+    +-
+    +-        lines = self.lines(caplog, "command_signing")
+    +-        assert len(lines) == 1
+    +-        assert "Car" in lines[0]
+    +-        assert "command_signing: required" in lines[0]
+    +-        assert "teslaProxy" in lines[0]
+    +-        assert "TeslaBLE" in lines[0]
+    +-
+    +-    @pytest.mark.parametrize("signing", [None, "weird"], ids=["missing", "unknown"])
+    +-    def test_unknown_value_logged_as_read_only(
+    +-        self, owner_car, any_http, caplog, signing
+     +    @pytest.mark.parametrize(
+     +        "status,body",
+     +        [
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +    )
+     +    def test_both_tokens_owner_refusal_hands_to_fleet(
+     +        self, no_threads, requests_mock, status, body
+    -+    ):
+    +     ):
+    +-        caplog.set_level(logging.INFO)
+    +-        api, vehicle = owner_car(signing)
+    +-        provider = tesla_provider(api)
+    +-        provider.setAmps(vehicle.vin, 10)
+    +-        provider.setAmps(vehicle.vin, 12)
+    +-
+    +-        lines = self.lines(caplog, "command_signing")
+    +-        assert len(lines) == 1
+    +-        assert "read-only" in lines[0]
+    +-        if signing:
+    +-            assert signing in lines[0]
+    +-
+    +-    def test_mixed_fleet_logs_signed_car_only(self, mixed_fleet, requests_mock, caplog):
+    +-        caplog.set_level(logging.INFO)
+    +-        api, unsigned, signed = mixed_fleet
+    +-        requests_mock.post(re.compile(r".*/command/set_charging_amps"), json=ACCEPTED)
+    +-        provider = tesla_provider(api)
+    +-        provider.setAmps(signed.vin, 10)
+    +-        provider.setAmps(unsigned.vin, 10)
+    +-        provider.setAmps(signed.vin, 12)
+    +-
+    +-        lines = self.lines(caplog, "command_signing")
+    +-        assert len(lines) == 1
+    +-        assert "Signed" in lines[0]
+    +-
+    +-    def test_latch_logged_once(self, owner_car, requests_mock, caplog):
+    +-        caplog.set_level(logging.INFO)
+    +-        api, vehicle = owner_car("off")
+    +-        requests_mock.post(
+    +-            OWNER_URL + "/5YJ3E1EA1KF000001/command/set_charging_amps",
+    +-            status_code=403,
+    +-            json=VCP_403,
+    +-        )
+    +-        provider = tesla_provider(api)
+    +-        provider.setAmps(vehicle.vin, 10)
+    +-        provider.setAmps(vehicle.vin, 12)
+    +-        provider.wake(vehicle.vin)
+    +-
+    +-        lines = self.lines(caplog, "Car")
+    +-        assert len(lines) == 1
+    +-        assert "teslaProxy" in lines[0]
+    +-        assert "TeslaBLE" in lines[0]
+    +-
+     +        # A refused Owner command is not sent and excludes the provider, so
+     +        # FleetAPI sends on the next pass without waiting RETRY
+     +        from TWCManager.Vehicle.Reconcile.Desired import CHARGE_LIMIT
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        for _ in range(3):
+     +            r.pass_()
+     +        assert sent.call_count == 1 and cmd.call_count == 2
+    -+
+    + 
+    +-class TestOrderLogsWhy:
+    +-    """When every listed car is read-only, the provider order leaves TeslaAPI
+    +-    out without calling it; the walk still logs the per-car reason once."""
+     +    @pytest.mark.parametrize("signing", ["required", None, "weird"])
+     +    def test_both_tokens_other_cars_go_to_fleet(
+     +        self, no_threads, requests_mock, signing
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        ]
+     +        assert bearer(cmd.last_request) == api.fleetSlot.accessToken
+     +        assert last.calls == []
+    -+
+    -+
+    + 
+    +-    def test_one_line_naming_the_car(self, owner_car, any_http, caplog):
+    +-        caplog.set_level(logging.INFO)
+    +-        api, vehicle = owner_car("required")
+    +-        assert api.readOnly is True
+    + 
+    +-        for _ in range(5):
+    +-            assert amps_candidates(api, vehicle) == ["Fallback"]
+     +class TestVehicleEndpointPerCar:
+     +    # The distributor budgets power only for a car some provider can set
+     +    # amps on: an "off" car on an Owner token is one, a "required" car not
+     +    def test_is_read_only_per_car(self, no_threads):
+     +        from TWCManager.EVSEInstance.VehicleEndpoint import VehicleEndpoint
+    -+
+    + 
+    +-        lines = [
+    +-            r.getMessage()
+    +-            for r in caplog.records
+    +-            if r.levelno == logging.INFO and "read-only" in r.getMessage()
+    +-        ]
+    +-        assert len(lines) == 1
+    +-        assert "read-only for Car" in lines[0]
+    +-        assert "command_signing: required" in lines[0]
+    +-        assert "teslaProxy" in lines[0]
+    +-        assert "TeslaBLE" in lines[0]
+    +-        assert any_http.call_count == 0
+    +-        assert no_error_recorded(api)
+     +        api = owner_api_with("off")
+     +        add_home_vehicle(api, command_signing="required", vin=VIN2, id=2)
+     +        order = wire_reads(api.registry, *api.providers())
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestCheckChargeRefreshesEachMod
+     +        assert VehicleEndpoint(off, order, master).provider == "OwnerAPI"
+     +        assert VehicleEndpoint(required, order, master).isReadOnly is True
+     
+    - ## tests/unit/test_teslaapi_refresh.py ##
+    -@@ tests/unit/test_teslaapi_refresh.py: class TestPastedRefreshToken:
+    -         assert owner.last_request.json()["client_id"] == "ownerapi"
+    -         assert owner.last_request.json()["refresh_token"] == pasted
+    -         assert api.ownerSlot.accessToken == new_access
+    --        assert api.readOnly is True
+    -+        assert api.slotFor("command") is None
+    -         assert api.ownerSlot.baseURL == OWNER_API_URL
+    - 
+    -     def test_owner_refresh_token_pasted_back(self, requests_mock):
+    -@@ tests/unit/test_teslaapi_refresh.py: class TestPastedRefreshToken:
+    -         assert fleet.call_count == 0
+    -         assert owner.call_count == 1
+    -         assert api.ownerSlot.accessToken == new_access
+    --        assert api.readOnly is True
+    -+        assert api.slotFor("command") is None
+    - 
+    -     def test_owner_access_token_pasted_back(self, requests_mock):
+    -         refresh = requests_mock.post(AUTH_TOKEN_URL, json={})
+    -@@ tests/unit/test_teslaapi_refresh.py: class TestPastedRefreshToken:
+    - 
+    -         assert refresh.call_count == 0
+    -         assert api.ownerSlot.accessToken == access
+    --        assert api.readOnly is True
+    -+        assert api.slotFor("command") is None
+    -         assert {"cmd": "saveSettings"} in api.master.tasks
+    - 
+    -     @pytest.mark.parametrize(
+    -@@ tests/unit/test_teslaapi_refresh.py: class TestLoginPages:
+    -         assert "bare access or refresh" in page
+    - 
+    -     def test_success_page_for_owner_token_points_at_ble(self):
+    --        page = render_login_page("success", carapi=Mock(readOnly=True))
+    -+        page = render_login_page("success", carapi=Mock(ownerTokenOnly=True))
+    -         assert "TeslaBLE" in page
+    -+        assert "command_signing" in page
+    -         assert "you also need the Tesla Vehicle Command proxy" not in page
+    - 
+    -     def test_success_page_for_fleet_token_points_at_proxy(self):
+    --        page = render_login_page("success", carapi=Mock(readOnly=False))
+    -+        page = render_login_page("success", carapi=Mock(ownerTokenOnly=False))
+    -         assert "you also need the Tesla Vehicle Command proxy" in page
+    - 
+    - 
+    -@@ tests/unit/test_teslaapi_refresh.py: class TestNoClientID:
+    - 
+    -         assert owner.call_count == 1
+    -         assert owner.last_request.json()["client_id"] == "ownerapi"
+    --        assert api.readOnly is True
+    -+        assert api.slotFor("command") is None
+    - 
+    -     def test_fleet_refresh_refused(self, requests_mock, caplog):
+    -         fleet = requests_mock.post(FLEET_REFRESH_URL, json={})
+    -
+      ## tests/unit/test_teslaapi_registry.py ##
+     @@ tests/unit/test_teslaapi_registry.py: def test_debug_interface_resolves_by_vin():
+          master.reconciler = inline(VehicleReconciler(master))
+    @@ tests/unit/test_teslaapi_request_errors.py: def test_a_fleet_401_never_refreshes
+      
+     
+      ## tests/unit/test_teslaapi_token_classification.py ##
+    -@@ tests/unit/test_teslaapi_token_classification.py: class TestOwnerToken:
+    -         api = new_api()
+    -         assert api.storeToken(owner_token()) == "success"
+    -         assert api.ownerSlot.baseURL == OWNER_URL
+    --        assert api.readOnly is True
+    -+        assert api.slotFor("command") is None
+    - 
+    -     def test_owner_token_ignores_tesla_proxy(self, proxy_api):
+    -         proxy_api.storeToken(owner_token())
+    -         assert proxy_api.ownerSlot.baseURL == OWNER_URL
+    --        assert proxy_api.readOnly is True
+    -+        assert proxy_api.slotFor("command") is None
+    -         # The proxy's certificate must not be used to verify owner-api.
+    -         assert proxy_api.ownerSlot.verifyCert is True
+    - 
+     @@ tests/unit/test_teslaapi_token_classification.py: class TestUnknownToken:
+              assert api.slotFor("read") is None and api.slotFor("command") is None
+              assert api.is_awake(vehicle) is False
+    @@ tests/unit/test_teslaapi_token_classification.py: class TestUnknownToken:
+      
+              assert any_call.call_count == 0
+              assert api.getCarApiLastErrorTime() == 0
+    -@@ tests/unit/test_teslaapi_token_classification.py: class TestSwitching:
+    -     def test_owner_and_fleet_keep_their_own_routes(self, proxy_api):
+    -         proxy_api.storeToken(owner_token())
+    -         assert proxy_api.ownerSlot.baseURL == OWNER_URL
+    --        assert proxy_api.readOnly is True
+    -+        assert proxy_api.slotFor("command") is None
+    - 
+    -         proxy_api.storeToken(fleet_token())
+    -         assert proxy_api.fleetSlot.baseURL == PROXY_URL
+     
+      ## tests/unit/test_teslaapi_token_slots.py ##
+     @@
+    @@ tests/unit/test_teslaapi_token_slots.py: def test_command_refused_without_usable
+      
+          assert anyCall.call_count == 0
+          assert api.getCarApiLastErrorTime() == 0
+    -@@ tests/unit/test_teslaapi_token_slots.py: def test_save_and_load_keep_both_slots(tmp_path):
+    -     assert api2.fleetSlot.refreshToken == "r-f"
+    - 
+    - 
+    --def test_readonly_property_follows_fleet_slot():
+    -+def test_readonly_property_follows_fleet_slot(no_threads):
+    -     api = new_api()
+    -     assert api.readOnly is True
+    -     api.storeToken(owner_token())
+    -+    # Unknown until the vehicles are listed; a car without command_signing
+    -+    # "off" is read-only on an Owner token.
+    -+    add_home_vehicle(api)
+    -     assert api.readOnly is True
+    -     api.storeToken(fleet_token())
+    -     assert api.readOnly is False
+    -@@ tests/unit/test_teslaapi_token_slots.py: def test_slot_for_is_uniform_walk():
+    -     owner_only = new_api()
+    -     owner_only.ownerSlot.setTokens(owner_token())
+    -     assert owner_only.slotFor("command") is None
+    --    assert owner_only.readOnly is True
+    - 
+    - 
+    - def test_owner_401_clears_owner_and_next_read_uses_fleet(
+ 6:  8f151742 =  6:  50436bfa Log vehicle wake decisions at INFO
+ 7:  036d12e5 =  7:  aaf79083 Raise TeslaBLE's default command timeout to 15 s
+ 8:  b0295eb9 !  8:  e4a06f9b Make the Vehicles page readable and drop Vehicle.tier
+    @@ tests/unit/test_telemetry_registry.py: def test_fleet_live_message_attaches_by_t
+     +def test_a_live_report_lists_the_source_on_the_car_but_retained_does_not():
+     +    t, reg = make()
+     +    t.vinFor = lambda vid: VIN
+    -+    t.applyDataToVehicle("1", "display_name", "<car>", retained=True)
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar", retained=True)
+     +    t.applyDataToVehicle("1", "charge_limit_soc", "80", retained=True)
+     +    assert reg.get(VIN) is None  # a retained message never creates a car
+    -+    t.applyDataToVehicle("1", "display_name", "<car>")
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar")
+     +    claim = reg.get(VIN).claims["Probe"]
+     +    assert (claim.status, claim.commands, claim.keepsAlive) == ("reports", False, False)
+     +    # a silent telemetry-only car still ages out, and the claim buys it nothing
+     +    assert reg.expire(now=reg.now() + reg.forgetAfter + 1) == [VIN]
+     +    # a car with only retained data later reported live: claim made once
+    -+    t.applyDataToVehicle("1", "display_name", "<car>")
+    ++    t.applyDataToVehicle("1", "display_name", "TestCar")
+     +    reg.get(VIN).claims["Probe"]
+     
+      ## tests/unit/test_teslaapi_providers.py ##
+    @@ tests/unit/test_teslaapi_registry.py: from unittest.mock import ANY, Mock
+      
+     @@ tests/unit/test_teslaapi_registry.py: def test_vehicle_joins_registry_and_claims_teslaapi():
+          assert reg.attached("TeslaAPI") == [(v, v.attachment("TeslaAPI"))]
+    -     assert v.name == "<car>"
+    +     assert v.name == "TestCar"
+          api.fleetSlot.clear()
+     -    assert v.tier == "observed"  # no command slot: read-only
+     +    assert not commands(v)  # no command slot: read-only
+    @@ tests/unit/test_vehicles_page.py: def test_held_limit_reads_the_vin_store_after_
+     @@ tests/unit/test_vehicles_page.py: def test_list_renders_registry_rows():
+          m = master()
+          html = render(m)
+    -     assert f"/vehicleDetail/{VIN}" in html and "<car>" in html
+    +     assert f"/vehicleDetail/{VIN}" in html and "TestCar" in html
+     -    assert "managed" in html
+     -    assert "TeslaBLE (paired)" in html and "90% (holding 80%)" in html
+     +    assert "BLE: paired" in html and "TeslaBLE" not in html
+ 9:  b55af397 !  9:  fe0990a9 Record Tesla API observations under the slot that made them
+    @@ tests/unit/test_registry_callers.py: def _handler(master):
+      def _registry():
+          reg = VehicleRegistry({})
+     -    v = reg.getOrCreate(VIN, "TeslaAPI")
+    --    v.observe("name", "<car>", "TeslaAPI")
+    +-    v.observe("name", "TestCar", "TeslaAPI")
+     -    v.observe("lat", 47.5, "TeslaAPI")
+     -    v.observe("lon", -122.25, "TeslaAPI")
+     +    v = reg.getOrCreate(VIN, "OwnerAPI")
+    -+    v.observe("name", "<car>", "OwnerAPI")
+    ++    v.observe("name", "TestCar", "OwnerAPI")
+     +    v.observe("lat", 47.5, "OwnerAPI")
+     +    v.observe("lon", -122.25, "OwnerAPI")
+          v.attach("TeslaAPI", object())
+    @@ tests/unit/test_registry_membership.py: def test_raising_liveness_counts_as_not_
+      def test_find_by_name_and_attached():
+          r = VehicleRegistry({})
+     -    v = r.getOrCreate(VIN, "TeslaAPI")
+    --    v.observe("name", "<car>", "TeslaAPI")
+    +-    v.observe("name", "TestCar", "TeslaAPI")
+     +    v = r.getOrCreate(VIN, "OwnerAPI")
+    -+    v.observe("name", "<car>", "OwnerAPI")
+    ++    v.observe("name", "TestCar", "OwnerAPI")
+          v.attach("TeslaAPI", "obj")
+    -     assert r.findByName("<car>") is v and r.findByName("x") is None
+    +     assert r.findByName("TestCar") is v and r.findByName("x") is None
+          assert r.attached("TeslaAPI") == [(v, "obj")] and r.attached("HomeAssistant") == []
+     @@ tests/unit/test_registry_membership.py: def test_summaries_sorted_by_key():
+      def test_get_or_create_rejects_non_ascii_like_load():
+    @@ tests/unit/test_telemetry_registry.py: def test_vin_keyed_telemetry_creates_regi
+      
+      def test_name_match_against_registry_without_cloud_list():
+          t, reg = make()
+    --    reg.getOrCreate(VIN, "TeslaBLE").observe("name", "<car>", "TeslaAPI")
+    -+    reg.getOrCreate(VIN, "TeslaBLE").observe("name", "<car>", "OwnerAPI")
+    -     assert t.updateVehicles("1", "<car>", loadList=False) is True
+    +-    reg.getOrCreate(VIN, "TeslaBLE").observe("name", "TestCar", "TeslaAPI")
+    ++    reg.getOrCreate(VIN, "TeslaBLE").observe("name", "TestCar", "OwnerAPI")
+    +     assert t.updateVehicles("1", "TestCar", loadList=False) is True
+          assert t.vehicles["1"] is reg.get(VIN)
+      
+     @@ tests/unit/test_telemetry_registry.py: def test_healthy_teslamate_car_reads_without_api_calls(teslamate):  # ruling 1
+    @@ tests/unit/test_teslaapi_registry.py
+      from tests.unit.teslatokens import FakeMaster, fleet_token, new_api, wire_reads
+     @@ tests/unit/test_teslaapi_registry.py: def test_listing_is_a_sighting():
+          api, reg = api_with_registry()
+    -     api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
+    +     api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+          v = reg.get(VIN)
+     -    assert v.lastSeenSource == "TeslaAPI"
+     -    assert v.latest("name").source == "TeslaAPI"
+    @@ tests/unit/test_teslaapi_registry.py: def test_listing_is_a_sighting():
+      
+      
+      def test_master_without_registry_gets_a_private_one():
+    -@@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_the_cars_own_current_request():   # slim T
+    +@@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_the_cars_own_current_request():  # slim Ta
+          api.is_far_from_home = Mock(return_value=False)
+          assert api.update_vehicle_data(reg.get(VIN)) is True
+          obs = reg.get(VIN).latest("chargeCurrentRequest")
+     -    assert (obs.value, obs.source) == (16, "TeslaAPI")
+    +-    assert reg.get(VIN).value("availableCurrent") == 32  # the pilot stays the pilot
+     +    assert (obs.value, obs.source) == (16, "OwnerAPI")
+    -     assert reg.get(VIN).value("availableCurrent") == 32   # the pilot stays the pilot
+    - 
+    - 
+    ++    assert reg.get(VIN).value("availableCurrent") == 32   # the pilot stays the pilot
+    ++
+    ++
+     +@pytest.mark.parametrize("kind, source", [("owner", "OwnerAPI"), ("fleet", "FleetAPI")])
+     +def test_each_slot_records_its_own_source(kind, source):
+     +    # Never "TeslaAPI": the listing and each read name the slot that made it
+    @@ tests/unit/test_teslaapi_registry.py: def test_update_vehicle_data_observes_the_
+     +    assert api.update_vehicle_data(v, slot=slot) is True
+     +    assert api.get_car_api.call_args.kwargs["slot"] is slot
+     +    assert {v.latest(f).source for f in ("lat", "lon", "batteryLevel")} == {source}
+    -+
+    -+
+    + 
+    + 
+      def test_debug_interface_resolves_by_vin():
+    -     from TWCManager.Vehicle.Providers.Order import ProviderOrder
+    -     from TWCManager.Vehicle.Reconcile.Desired import DesiredStore
+     @@ tests/unit/test_teslaapi_registry.py: def test_listing_attaches_state_and_both_claims():
+          assert fleet.commands is False  # no Fleet token yet
+          api.storeToken(fleet_token())
+          assert fleet.commands is True  # follows the slot
+    --    assert v.latest("name").source == "TeslaAPI" and v.name == "<car>"
+    -+    assert v.latest("name").source == "OwnerAPI" and v.name == "<car>"
+    +-    assert v.latest("name").source == "TeslaAPI" and v.name == "TestCar"
+    ++    assert v.latest("name").source == "OwnerAPI" and v.name == "TestCar"
+          assert reg.attached("TeslaAPI") == [(v, state)]
+      
+      
+    @@ tests/unit/test_vehicles_page.py: def env(master):
+      def master():
+          reg = VehicleRegistry({})
+          v = reg.getOrCreate(VIN, "TWC")
+    --    v.observe("name", "<car>", "TeslaAPI")
+    -+    v.observe("name", "<car>", "OwnerAPI")
+    +-    v.observe("name", "TestCar", "TeslaAPI")
+    ++    v.observe("name", "TestCar", "OwnerAPI")
+          v.claim("TeslaBLE", True, "paired")
+          reg.beginPlugSession("8244")
+          m = SimpleNamespace(

@@ -1,0 +1,630 @@
+ 1:  270af7a3 =  1:  fd932745 Add vehicle providers and a fixed provider order
+ 2:  1e26e4bd =  2:  e3df38ba Add the Gen2 TWC provider
+ 3:  6fcfa342 =  3:  b2b0b283 Add the Gen3 TWC provider with one shared headroom
+ 4:  e78b27bf =  4:  86fe5f2b Add the TeslaBLE provider
+ 5:  d3fa5e64 !  5:  484ad12d Split the Tesla API into Owner and Fleet providers
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              if "vin" in json:
+                  try:
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+    -         self.name = json["display_name"] or self.VIN or str(self.ID) or "unknown"
+    +         self.ownerCommandsRetired = False
+      
+          def _bind(self, vehicle, listed=False):
+     -        # Joins the registry vehicle: the claim follows command access. A
+ 6:  293e2f5f =  6:  6a7e4742 Identify the car on a Gen3 TWC from the energy site's live_status
+ 7:  edcba746 !  7:  c644790a Add telemetry and HomeAssistant providers; register them at startup
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+     +    * (@MikeBishop) - A providerSuppressions entry for HomeAssistant now also drops Home Assistant vehicle reads, not only its commands
+          * (@MikeBishop) - The debug API `/api/sendTeslaAPICommand` now takes the vehicle's VIN (`vehicleVIN`) instead of the numeric vehicle ID (`vehicleID`); the web UI and debug dump read vehicles from the registry
+      * Bugfixes
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+    +     * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+     
+      ## lib/TWCManager/TWCManager.py ##
+     @@ lib/TWCManager/TWCManager.py: import datetime
+ 8:  1cf65dfc !  8:  c4e8b867 Make VehiclePriority a facade over the provider order
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+          * (@MikeBishop) - The debug API `/api/sendTeslaAPICommand` now takes the vehicle's VIN (`vehicleVIN`) instead of the numeric vehicle ID (`vehicleID`); the web UI and debug dump read vehicles from the registry
+      * Bugfixes
+     +    * (@MikeBishop) - A targeted start, stop or charge limit sent through Home Assistant now affects only the named car; a command for every car still reaches every Home Assistant car
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+          * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+          * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+    +     * Fix: Correct invalid logging level in update_vehicle_data error handler which crashed when logging a failed API response
+     
+      ## docs/Settings.md ##
+     @@ docs/Settings.md: Allows you to select which theme you'd like to use for the TWCManager interface.
+    @@ lib/TWCManager/Vehicle/HomeAssistant.py: class HomeAssistant:
+                  if not v.at_home:
+                      logger.debug("%s not at home; skipping charge limit", v.name)
+     
+    + ## lib/TWCManager/Vehicle/Providers/Capability.py ##
+    +@@ lib/TWCManager/Vehicle/Providers/Capability.py: CLOUD_FREE = Cost(TIER_CLOUD_FREE, 0.0)
+    + FLEET_COMMAND = Cost(TIER_BILLED, 0.001)
+    + FLEET_DATA = Cost(TIER_BILLED, 0.002)
+    + FLEET_WAKE = Cost(TIER_BILLED, 0.02)
+    ++# An Owner API command or wake costs nothing, but stands in for Fleet and
+    ++# Tesla rate-limits it: paced as the billed tier is
+    ++OWNER_COMMAND = Cost(TIER_BILLED, 0.0)
+    + HA_BILLED = Cost(TIER_BILLED, None)
+    + DISRUPTIVE = Cost(TIER_DISRUPTIVE, 0.0)
+    + 
+    +
+      ## lib/TWCManager/Vehicle/Providers/HomeAssistantProvider.py ##
+     @@ lib/TWCManager/Vehicle/Providers/HomeAssistantProvider.py: class HomeAssistantProvider(Provider):
+          name = "HomeAssistant"
+    @@ lib/TWCManager/Vehicle/Providers/Provider.py: class Provider:
+      
+          def limitations(self, vehicle) -> FrozenSet[str]:
+     
+    + ## lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py ##
+    +@@
+    + # The TeslaAPI module's two token slots as two providers. The Owner API reads
+    +-# for free and never commands. The Fleet API bills each vehicle_data, command
+    +-# and wake, so it reads only when the Owner slot cannot (slotFor("read")), and
+    +-# it alone commands and wakes. Neither does I/O to answer ready or available.
+    ++# for free, and commands and wakes only a car Tesla lists with
+    ++# command_signing "off", while no Fleet token commands. The Fleet API bills
+    ++# each vehicle_data, command and wake, so it reads only when the Owner slot
+    ++# cannot (slotFor("read")). Neither does I/O to answer ready or available.
+    + # Both read the energy site's Wall Connector VINs for free, Owner first.
+    + from typing import Dict, Optional, Tuple
+    + 
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: from .Capability import (
+    +     FLEET_COMMAND,
+    +     FLEET_DATA,
+    +     FLEET_WAKE,
+    ++    OWNER_COMMAND,
+    +     READ_CHARGE,
+    +     READ_LIST,
+    +     READ_LOCATION,
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: FLEET_COMMAND_LIMIT = RateLimit(50, 60)
+    + # One connect-edge query plus one poll a minute
+    + WALL_CONNECTOR_VINS = Declaration(CLOUD_FREE, RateLimit(2, 60))
+    + 
+    ++# The Tesla command each capability sends, for the read-only line
+    ++TESLA_COMMAND = {
+    ++    SET_CHARGE_LIMIT: "set_charge_limit",
+    ++    START_CHARGING: "charge_start",
+    ++    STOP_CHARGING: "charge_stop",
+    ++    SET_AMPS: "set_charging_amps",
+    ++    WAKE: "wake_up",
+    ++}
+    ++
+    + 
+    + class OwnerAPIProvider(Provider):
+    +     name = "OwnerAPI"
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Provider):
+    +             capability: Declaration(CLOUD_FREE)
+    +             for capability in (READ_LIST, READ_ONLINE, READ_CHARGE, READ_LOCATION)
+    +         }
+    ++        declared.update(
+    ++            {capability: Declaration(OWNER_COMMAND) for capability in COMMANDS}
+    ++        )
+    +         declared[READ_WALL_CONNECTOR_VINS] = WALL_CONNECTOR_VINS
+    +         return declared
+    + 
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class OwnerAPIProvider(Provider):
+    +             return self.carapi.wallConnectorVinsReady(self.carapi.ownerSlot)
+    +         if vehicle is None or capability not in self.declarations():
+    +             return False
+    +-        return (
+    +-            self.carapi.ownerSlot.usable("read")
+    +-            and vehicle.attachment("TeslaAPI") is not None
+    +-        )
+    ++        car = vehicle.attachment("TeslaAPI")
+    ++        if car is None:
+    ++            return False
+    ++        if capability in COMMANDS:
+    ++            # Says once why a car is read-only, as the module would have
+    ++            return self.available(capability) and not self.carapi.refuseCommandFor(
+    ++                car, TESLA_COMMAND[capability]
+    ++            )
+    ++        return self.carapi.ownerSlot.usable("read")
+    ++
+    ++    def available(self, capability) -> bool:
+    ++        # The broadcast gate for commands: an Owner token that may command
+    ++        # some listed car, or whose cars are not listed yet, while no Fleet
+    ++        # token commands (TeslaAPI then sends through the Fleet slot)
+    ++        if capability in COMMANDS:
+    ++            return (
+    ++                not self.carapi.fleetSlot.usable("command") and not self.carapi.readOnly
+    ++            )
+    ++        return True
+    + 
+    +     def wallConnectorVins(self) -> Optional[Dict[str, str]]:
+    +         return self.carapi.wallConnectorVins(self.carapi.ownerSlot)
+    +@@ lib/TWCManager/Vehicle/Providers/TeslaAPIProviders.py: class FleetAPIProvider(Provider):
+    +         )
+    + 
+    +     def available(self, capability) -> bool:
+    +-        # The broadcast gate: an Owner-only install never sends a
+    +-        # vehicle-less command here, as today's read-only refusal skips it
+    ++        # The broadcast gate: without a Fleet command token no vehicle-less
+    ++        # command comes here (an Owner token's commands go per car, through
+    ++        # the OwnerAPI provider). While no listed car can be commanded, the
+    ++        # module says once why, as it would when called.
+    +         if capability in COMMANDS:
+    +-            return self.carapi.fleetSlot.usable("command")
+    ++            usable = self.carapi.fleetSlot.usable("command")
+    ++            if not usable:
+    ++                self.carapi.refuseCommandIfReadOnly(TESLA_COMMAND[capability])
+    ++            return usable
+    +         if capability == READ_WALL_CONNECTOR_VINS:
+    +             return self.carapi.wallConnectorVinsReady(self.carapi.fleetSlot)
+    +         return self.carapi.fleetSlot.usable("read")
+    +
+      ## lib/TWCManager/Vehicle/TeslaAPI.py ##
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                      return
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+          def refreshTokenTypeKnown(self, token):
+              # True when the refresh token's type can be told from the token
+              # itself: only an Owner API refresh token (a JWT) is recognisable.
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class CarApiVehicle:
+    +         self.ownerCommandsRetired = False
+    + 
+    +     def _bind(self, vehicle, listed=False):
+    +-        # Joins the registry vehicle with both claims. The Owner API never
+    +-        # commands; the Fleet claim follows the Fleet slot live, so a token
+    +-        # pasted or synced after the listing manages the car without a
+    +-        # re-list. A listing attaches this object; a rebind (after a forget)
+    ++        # Joins the registry vehicle with both claims. The Owner claim
+    ++        # follows this car's command_signing and the Fleet claim the Fleet
+    ++        # slot, live, so a token pasted or synced after the listing manages
+    ++        # the car without a re-list. A listing attaches this object; a rebind (after a forget)
+    +         # only takes an empty attachment, so a stale object never displaces a
+    +         # newer one.
+    +         if vehicle is not self._vehicle:
+    +             if listed or vehicle.attachment("TeslaAPI") is None:
+    +                 vehicle.attach("TeslaAPI", self)
+    +             carapi = self.carapi
+    +-            vehicle.claim("OwnerAPI", False, "listed")
+    ++            vehicle.claim(
+    ++                "OwnerAPI", lambda: carapi.ownerCommandsAllowed(self), "listed"
+    ++            )
+    +             vehicle.claim(
+    +                 "FleetAPI", lambda: carapi.fleetSlot.usable("command"), "listed"
+    +             )
+     
+      ## lib/TWCManager/Vehicle/VehiclePriority.py ##
+     @@
+    @@ lib/TWCManager/Vehicle/VehiclePriority.py: class VehiclePriority:
+     +
+     +    @staticmethod
+     +    def _listUnloaded(provider) -> bool:
+    -+        # FleetAPI is ready only for a car on TeslaAPI's vehicle list, but
+    -+        # only TeslaAPI's own command methods load that list. Until it is
+    -+        # loaded, a targeted command keeps Fleet (ordered() has already
+    -+        # checked it can command), and TeslaAPI loads the list and finds the
+    -+        # car itself, as before the provider order.
+    -+        if provider.name != "FleetAPI":
+    ++        # TeslaAPI's providers are ready only for a car on its vehicle list,
+    ++        # but only TeslaAPI's own command methods load that list. Until it
+    ++        # is loaded, a targeted command keeps them (ordered() has already
+    ++        # checked the slot can command), and TeslaAPI loads the list and
+    ++        # finds the car itself, as before the provider order.
+    ++        if provider.name not in ("OwnerAPI", "FleetAPI"):
+                  return False
+     -        if self.commandPolicy == "ble_only" and module_name == "TeslaAPI":
+     -            return True
+    @@ lib/TWCManager/Vehicle/VehiclePriority.py: class VehiclePriority:
+     -        return False
+     -
+     -    def _skip_read_only_for_command(self, module_ref, method_name):
+    --        """Return True if module_ref holds a read-only token (TeslaAPI with an
+    --        Owner API token) and method_name is a state-changing command. The
+    --        next module is tried instead; the skip is not counted as a failure.
+    +-        """Return True if module_ref is read-only (TeslaAPI with no token
+    +-        that can command any listed car, e.g. an Owner API token whose cars
+    +-        all need signed commands) and method_name is a state-changing
+    +-        command. The next module is tried instead; the skip is not counted
+    +-        as a failure. When only some cars are read-only, the module refuses
+    +-        those itself and returns failure, so the next module is tried too.
+     -        Compared with `is True` so a module without the attribute, or a
+    --        Mock in tests, is never skipped."""
+    +-        Mock in tests, is never skipped.
+    +-
+    +-        On a skip, the module's own refuseCommandIfReadOnly logs why (per
+    +-        car, once per state change); otherwise the only line would be this
+    +-        class's INFO2 skip. Looked up on the class, so a Mock or a module
+    +-        without the method is not called."""
+     -        if method_name not in self.COMMAND_METHODS:
+     +        try:
+     +            return provider.module.getVehicleCount() == 0
+     +        except Exception as e:
+     +            logger.debug(f"{provider.name} getVehicleCount() raised {type(e).__name__}")
+                  return False
+    --        return getattr(module_ref, "readOnly", False) is True
+    +-        if getattr(module_ref, "readOnly", False) is not True:
+    ++
+    ++    @staticmethod
+    ++    def _available(provider, capability) -> bool:
+    ++        try:
+    ++            return bool(provider.available(capability))
+    ++        except Exception as e:
+    ++            logger.debug(f"{provider.name} available() raised {type(e).__name__}")
+    +             return False
+    +-        if callable(getattr(type(module_ref), "refuseCommandIfReadOnly", None)):
+    +-            module_ref.refuseCommandIfReadOnly(method_name)
+    +-        return True
+      
+     -    def _calculate_retries(self, priority):
+     -        """Calculate number of retries based on priority level.
+    @@ lib/TWCManager/Vehicle/VehiclePriority.py: class VehiclePriority:
+     -        Example: priority 20 = 2 retries, priority 10 = 1 retry, priority 5 = 0 retries
+     -        """
+     -        return max(0, priority // 10)
+    -+    @staticmethod
+    -+    def _available(provider, capability) -> bool:
+    -+        try:
+    -+            return bool(provider.available(capability))
+    -+        except Exception as e:
+    -+            logger.debug(f"{provider.name} available() raised {type(e).__name__}")
+    -+            return False
+    -+
+     +    def _argsFor(self, provider, name, args, kwargs):
+     +        # The call's arguments for this provider's module, or None to skip
+     +        # it. A module that takes its own vehicle type (HomeAssistant) gets
+    @@ lib/TWCManager/VehicleCommandQueue.py: def _applyChargeLimitKwargs(task):
+     +
+     +
+      class VehicleCommandQueue:
+    -     _DISPATCH = {
+    -         "charge": lambda module, task: module.car_api_charge(task),
+    +     CHARGE_COMMAND_INTERVAL = 60
+    + 
+     @@ lib/TWCManager/VehicleCommandQueue.py: class VehicleCommandQueue:
+              "setChargeRate": lambda module, task: module.setChargeRate(
+                  task["amps"], task.get("vehicle")
+    @@ tests/unit/test_registry_callers.py: def _post(h, body):
+              h,
+              {"commandName": "wakeVehicle", "parameters": "{}", "vehicleVIN": VIN},
+     
+    + ## tests/unit/test_teslaapi_providers.py ##
+    +@@ tests/unit/test_teslaapi_providers.py: def test_two_providers_with_honest_costs():
+    +         5,
+    +         False,
+    +     )
+    +-    assert owner.cost(C.READ_CHARGE) == C.CLOUD_FREE and owner.cost(C.SET_AMPS) is None
+    ++    assert owner.cost(C.READ_CHARGE) == C.CLOUD_FREE and owner.cost(C.SET_AMPS) == C.OWNER_COMMAND
+    +     assert (
+    +         fleet.cost(C.READ_ONLINE) == C.CLOUD_FREE
+    +         and fleet.cost(C.READ_CHARGE) == C.FLEET_DATA
+    +
+      ## tests/unit/test_teslaapi_readonly_gate.py ##
+    -@@
+    - Read-only command gate.
+    - 
+    - While TeslaAPI holds no usable Fleet API token (readOnly), e.g. only an
+    --Owner API token, no vehicle command may reach Tesla: VehiclePriority skips TeslaAPI for command methods, and
+    -+Owner API token, no vehicle command may reach Tesla: the provider order keeps
+    -+FleetAPI out of every command walk, and
+    - TeslaAPI's own command entry points refuse without an HTTP call and without
+    - recording an API error (which would back off reads too). Reads still run.
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: Without a usable Fleet API token, TeslaAPI commands a vehicle with an Owner
+    + API token only when Tesla's /products entry for that vehicle says
+    + command_signing "off". Every other vehicle (signing "required", the field
+    + missing, or a value never seen) is read-only, as is every vehicle when no
+    +-token can command: no vehicle command may reach Tesla. VehiclePriority skips
+    +-TeslaAPI for command methods while every listed vehicle is read-only, and
+    +-TeslaAPI's own command entry points refuse per vehicle without an HTTP call
+    +-and without recording an API error (which would back off reads too). Reads
+    +-still run.
+    ++token can command: no vehicle command may reach Tesla. The provider order
+    ++keeps TeslaAPI out of a command walk for a read-only car (OwnerAPI is not
+    ++ready for it) and out of every broadcast while every listed car is
+    ++read-only (neither provider is available), and TeslaAPI's own command entry
+    ++points refuse per vehicle without an HTTP call and without recording an API
+    ++error (which would back off reads too). Reads still run.
+      """
+    + 
+    + import logging
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+      
+      
+      class TestVehiclePrioritySkipsReadOnly:
+    -+    # The facade walks the provider order: an Owner-only TeslaAPI has no
+    -+    # command slot, so FleetAPIProvider.available() keeps every broadcast
+    -+    # command away from it; reads still go through the Owner slot.
+    ++    # The facade walks the provider order: an Owner-only TeslaAPI whose
+    ++    # listed car needs signed commands has no provider available for a
+    ++    # command, so every broadcast command stays away from it; reads still
+    ++    # go through the Owner slot.
+          def make(self, api_read_only):
+     +        from tests.unit.test_carapivehicle_registry import api_with_registry
+     +        from TWCManager.Vehicle.Providers import Capability as C
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+      
+     +        api, reg = api_with_registry()
+     +        api.storeToken(owner_token() if api_read_only else fleet_token())
+    ++        add_home_vehicle(api, "required")
+     +        assert api.readOnly is api_read_only
+     +        api.setChargeRate = Mock(return_value=True)
+     +        api.updateChargeAtHome = Mock(return_value=True)
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestReadsStillRun:
+              assert priority.setChargeRate(10) is False
+              assert ble.setChargeRate.called
+              assert not api.setChargeRate.called
+    +-        assert not api.refuseCommandIfReadOnly.called
+     -        assert "TeslaAPI" not in master.stats["moduleFailures"]
+    +-
+    +-    def test_read_only_module_without_refusal_method_skipped(self):
+    +-        from TWCManager.Vehicle.VehiclePriority import VehiclePriority
+     +        assert "FleetAPI" not in master.stats["moduleFailures"]
+      
+    +-        class ReadOnlyModule:
+    +-            readOnly = True
+    +-
+    +-        master = Mock()
+    +-        assert (
+    +-            VehiclePriority(master)._skip_read_only_for_command(
+    +-                ReadOnlyModule(), "setChargeRate"
+    +-            )
+    +-            is True
+    +-        )
+    +-
+     -    def test_read_only_api_used_for_reads(self):
+     +    def test_read_only_api_used_for_reads(self, no_threads):
+              priority, master, ble, api = self.make(api_read_only=True)
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePrioritySkipsReadOnl
+              priority, master, ble, api = self.make(api_read_only=True)
+              setattr(ble, method, Mock(return_value=False))
+              setattr(api, method, Mock(return_value=True))
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: def owner_car(no_threads, no_sleep):
+    + 
+    + 
+    + def priority_over(api, ble):
+    +-    """VehiclePriority trying TeslaAPI first, then a mock BLE module."""
+    ++    """VehiclePriority walking the provider order: TeslaAPI's providers, then
+    ++    a mock fallback module ranked after them, as HomeAssistant is."""
+    ++    from TWCManager.Vehicle.Providers import Capability as C
+    ++    from TWCManager.Vehicle.Providers.Order import ProviderOrder
+    ++    from TWCManager.Vehicle.Providers.Provider import Provider
+    +     from TWCManager.Vehicle.VehiclePriority import VehiclePriority
+    + 
+    +-    master = Mock()
+    +-    master.stats = {"moduleSuccess": {}, "moduleFailures": {}}
+    +-    master.config = {}
+    +-    master.settings = {}
+    +-    master.getModuleByPriority = Mock(
+    +-        side_effect=[("TeslaAPI", api, 10), ("TeslaBLE", ble, 5), ("", None, 0)]
+    +-    )
+    ++    class Fallback(Provider):
+    ++        name, rank, local, module = "Fallback", 6, False, ble
+    ++
+    ++        def declarations(self):
+    ++            return {c: C.Declaration(C.HA_BILLED) for c in C.COMMANDS}
+    ++
+    ++        def ready(self, vehicle, capability):
+    ++            return True
+    ++
+    ++    master = api.master
+    ++    master.vehicleRegistry = api.registry
+    ++    master.providerOrder = ProviderOrder(master)
+    ++    for p in api.providers() + [Fallback()]:
+    ++        master.providerOrder.register(p)
+    +     return VehiclePriority(master)
+    + 
+    + 
+     
+      ## tests/unit/test_vehicle_priority.py ##
+     @@
+ 9:  535acb5d !  9:  9355d7f4 Replace TeslaAPIEVSE/TeslaAPIController with vehicle endpoints
+    @@ lib/TWCManager/EVSEInstance/TeslaAPIEVSE.py (deleted)
+     -
+     -    @property
+     -    def isReadOnly(self) -> bool:
+    --        # An Owner API token can read the vehicle but not command it, so the
+    --        # distributor must not budget power for it.
+    +-        # A car TeslaAPI can read but not command (no token can command it:
+    +-        # e.g. an Owner API token for a car that needs signed commands), so
+    +-        # the distributor must not budget power for it.
+     -        carapi = self.master.getModuleByName("TeslaAPI")
+    --        return carapi is not None and getattr(carapi, "readOnly", False) is True
+    +-        if carapi is None:
+    +-            return False
+    +-        readOnlyFor = getattr(carapi, "readOnlyFor", None)
+    +-        return callable(readOnlyFor) and readOnlyFor(self.vehicle) is True
+     -
+     -    @property
+     -    def isLocal(self) -> bool:
+    @@ tests/unit/test_teslaapi_controller.py (deleted)
+     
+      ## tests/unit/test_teslaapi_readonly_gate.py ##
+     @@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePrioritySkipsReadOnly:
+    -         setattr(api, method, Mock(return_value=True))
+    -         getattr(priority, method)()
+              assert not getattr(api, method).called
+    --
+    --
+    + 
+    + 
+     -class TestTeslaAPIEVSE:
+     -    def make_evse(self, carapi):
+     -        from TWCManager.EVSEInstance.TeslaAPIEVSE import TeslaAPIEVSE
+    @@ tests/unit/test_teslaapi_readonly_gate.py: class TestVehiclePrioritySkipsReadOnl
+     -
+     -    def test_not_read_only_without_tesla_api(self):
+     -        assert self.make_evse(None).isReadOnly is False
+    +-
+    +-
+    + # What Tesla answers a REST command for a car that needs signed commands.
+    + VCP_403 = {
+    +     "response": None,
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestMixedFleet:
+    +         assert amps.call_count == 1
+    +         assert not ble.setChargeRate.called
+    + 
+    +-    def test_evse_read_only_per_vehicle(self, mixed_fleet):
+    +-        from TWCManager.EVSEInstance.TeslaAPIEVSE import TeslaAPIEVSE
+    ++    def test_endpoint_read_only_per_vehicle(self, mixed_fleet):
+    ++        from TWCManager.EVSEInstance.VehicleEndpoint import VehicleEndpoint
+    ++        from TWCManager.Vehicle.Providers.Order import ProviderOrder
+    + 
+    +         api, unsigned, signed = mixed_fleet
+    +-        master = Mock()
+    +-        master.config = {"config": {}}
+    +-        master.getModuleByName = Mock(return_value=api)
+    +-        assert TeslaAPIEVSE(unsigned, Mock(), master).isReadOnly is False
+    +-        assert TeslaAPIEVSE(signed, Mock(), master).isReadOnly is True
+    ++        order = ProviderOrder(api.master)
+    ++        for p in api.providers():
+    ++            order.register(p)
+    ++        assert VehicleEndpoint(unsigned.vehicle, order, api.master).isReadOnly is False
+    ++        assert VehicleEndpoint(signed.vehicle, order, api.master).isReadOnly is True
+    + 
+    + 
+    + # Each owner-command path as VehiclePriority calls it: the endpoint under
+     
+      ## tests/unit/test_vehicle_endpoint.py (new) ##
+     @@
+    @@ tests/unit/test_vehicle_endpoint.py (new)
+     +    # Moved from test_teslaapi_readonly_gate's old EVSE case: an Owner-only
+     +    # TeslaAPI leaves FleetAPIProvider not ready, so the endpoint is read-only
+     +    api, reg = api_with_registry()
+    -+    api.addVehicle({"id": 1, "vin": VIN1, "display_name": "<car>"})
+    ++    api.addVehicle({"id": 1, "vin": VIN1, "display_name": "TestCar"})
+     +    order = ProviderOrder(api.master)
+     +    for p in api.providers(): order.register(p)
+     +    api.fleetSlot.clear(); api.storeToken(owner_token())
+10:  7ddd20f0 ! 10:  42f88641 Group charging endpoints into charging points and allocate per point
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+      * Bugfixes
+     +    * (@MikeBishop) - A car that stops charging on its TWC no longer gets a second power share and Fleet charge-rate commands of its own
+          * (@MikeBishop) - A targeted start, stop or charge limit sent through Home Assistant now affects only the named car; a command for every car still reaches every Home Assistant car
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+          * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+    +     * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+     
+      ## docs/Gen3_Status.md ##
+     @@ docs/Gen3_Status.md: In practice, a mixed Gen2+Gen3 deployment runs two RS485 buses:
+11:  86489bda ! 11:  e0a99f12 End a provider walk on a Fleet success, skip or wake hold
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+      
+              if self.lastChargeLimitApplied != limit:
+                  if limit != -1:
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    +         self.carApiLastChargeLimitApplyTime = now
+    + 
+    +         needSleep = False
+    ++        refused = False
+    +         for vehicle in self.carApiVehicles:
+    +             if self.refuseCommandFor(vehicle, "set_charge_limit"):
+    ++                refused = True
+    +                 continue
+    +             if vehicle.stopTryingToApplyLimit or not vehicle.ready():
+    +                 continue
+    +@@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+    + 
+    +             if vehicle.atHome and vehicle.stopTryingToApplyLimit:
+    +                 needSleep = True
+    ++            if self.readOnlyFor(vehicle):
+    ++                # Tesla refused the Owner API limit sent just now
+    ++                refused = True
+    + 
+    +         if needSleep:
+    +             # If you start charging too quickly after setting the charge limit,
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              if checkArrival:
+                  self.updateChargeAtHome()
+      
+     +        # VehiclePriority reads None as failure and would try the next
+    -+        # provider (Home Assistant: a second, billed command)
+    -+        return "success"
+    ++        # provider (Home Assistant: a second, billed command). A car this
+    ++        # module may not command is a failure, so the next provider gets it.
+    ++        return "error" if refused else "success"
+     +
+     +    def _unavailableResult(self):
+     +        # car_api_available() is False on a failure (no usable token, no
+    @@ lib/TWCManager/Vehicle/VehiclePriority.py: class VehiclePriority:
+                  logger.debug(f"VehiclePriority: All providers exhausted for {name}")
+                  return False
+     
+    + ## tests/unit/test_teslaapi_readonly_gate.py ##
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: COMMANDS = {
+    + REFUSED_RETURNS = {
+    +     "set_charging_amps": (False, False),
+    +     "apply_charge_limit": (False, False),
+    +-    "applyChargeLimit": (None, "error"),
+    ++    "applyChargeLimit": ("error", "error"),
+    +     "charge_start": ("error", "error"),
+    +     "charge_stop": ("error", "error"),
+    +     "wake_up": (False, False),
+    +@@ tests/unit/test_teslaapi_readonly_gate.py: class TestOwnerCommandRefusedByTesla:
+    +     FLEET_RETURNS = {
+    +         "set_charging_amps": lambda body: body,
+    +         "apply_charge_limit": lambda body: False,
+    +-        "applyChargeLimit": lambda body: None,
+    ++        "applyChargeLimit": lambda body: "success",
+    +         "charge_start": lambda body: "error",
+    +         "charge_stop": lambda body: "error",
+    +         "wake_up": lambda body: False,
+    +
+      ## tests/unit/test_vehicle_priority_returns.py (new) ##
+     @@
+     +# tests/unit/test_vehicle_priority_returns.py
+12:  9358856b ! 12:  98c2bec7 Let TeslaBLE and TeslaAPI take a targeted charge limit
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+              needToWake = False
+     -        for vehicle in self.carApiVehicles:
+     +        for vehicle in vehicles:
+    +             if self.refuseCommandFor(vehicle, "set_charge_limit"):
+    +                 continue
+                  wasAtHome, outside, lastApplied = self.master.getNormalChargeLimit(
+    -                 vehicle.ID
+    -             )
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+                      vehicle.stopTryingToApplyLimit = False
+                      vehicle.stopAskingToStartCharging = False
+    @@ lib/TWCManager/Vehicle/TeslaAPI.py: class TeslaAPI:
+     +            self.carApiLastChargeLimitApplyTime = now
+      
+              needSleep = False
+    +         refused = False
+     -        for vehicle in self.carApiVehicles:
+     +        for vehicle in vehicles:
+    -             if vehicle.stopTryingToApplyLimit or not vehicle.ready():
+    +             if self.refuseCommandFor(vehicle, "set_charge_limit"):
+    +                 refused = True
+                      continue
+    - 
+     
+      ## lib/TWCManager/Vehicle/TeslaBLE.py ##
+     @@ lib/TWCManager/Vehicle/TeslaBLE.py: class TeslaBLE:
+13:  b8adba7a = 13:  0a8ef318 Offer an idle Gen2 TWC the minimum its heartbeat sends
+14:  028931d5 = 14:  99b26327 Let a TWC decide whether its charging point wants power
+15:  e9dd2037 = 15:  a59da34f Drop provider declarations nothing reads
+16:  c90a0e9c ! 16:  45ccbefe Document the provider changes for users
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+     +    * (@MikeBishop) - Gen3 Wall Connectors each get their own target; several units on one bus share the headroom. TWCManager names the car on a Gen3 with a free read of the energy site's live status. This needs the Gen3 registered in the Tesla app and a token that can read energy data (a Fleet API token with the `energy_device_data` scope); a unit's optional `din` key fixes a wrong DIN guess
+     +    * (@MikeBishop) - `controller.Gen2TWCs.ranges` sets a per-TWC `minAmps` (in place of minAmpsPerTWC) and `maxAmps`
+      * Architecture
+    -     * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used read-only
+    +     * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used for reads, and for commands only to vehicles Tesla reports with `command_signing: off`
+          * (@MikeBishop) - Saved Tesla tokens migrate to separate Owner and Fleet settings on first start; downgrading afterwards loses the Owner API token (#692)
+     @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+          * (@MikeBishop) - A providerSuppressions entry for HomeAssistant now also drops Home Assistant vehicle reads, not only its commands
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+     -    * (@MikeBishop) - A car that stops charging on its TWC no longer gets a second power share and Fleet charge-rate commands of its own
+     +    * (@MikeBishop) - An idle Gen2 TWC is offered minAmpsPerTWC instead of 0 A when TWCManager shares power with Tesla API cars, so a TWC that honours 0 A still sees a car plug in
+          * (@MikeBishop) - A targeted start, stop or charge limit sent through Home Assistant now affects only the named car; a command for every car still reaches every Home Assistant car
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+          * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+    +     * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+     
+      ## docs/Settings.md ##
+     @@ docs/Settings.md: Vehicle commands (start and stop charging, set the charge rate, set the charge l
+17:  ff4eba64 ! 17:  c6180980 Leave the idle TWC minimum out of every budget
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+     -    * (@MikeBishop) - An idle Gen2 TWC is offered minAmpsPerTWC instead of 0 A when TWCManager shares power with Tesla API cars, so a TWC that honours 0 A still sees a car plug in
+     +    * (@MikeBishop) - When TWCManager shares power with Tesla API cars, the distributor gives an idle TWC a target of 0 and counts nothing against the budget. On the wire the TWC is offered 0 when no car is charging (a Gen2 treats 0 as its hardware minimum), and its hardware minimum (usually 6 A) when another car is charging and there is at least minAmpsPerTWC of power per car, so it still sees a car plug in. Brief overshoot is fine: the configured limit is already the 80% continuous rating and the next cycle rebalances
+          * (@MikeBishop) - A targeted start, stop or charge limit sent through Home Assistant now affects only the named car; a command for every car still reaches every Home Assistant car
+    -     * (@MikeBishop) - Queue vehicle commands per VIN and really cancel pending stop-charging commands when charging resumes (closes #667)
+          * Fix: Add missing module-level time import in HASS, EmonCMS, Growatt, IotaWatt, SmartMe and TCP modules, which crashed EMS polling and caused charge current oscillation (closes #644)
+    +     * Fix: Restore minInterval parameter on update_location, fixing TypeError that broke API start/stop charging and home location correction
+     
+      ## docs/modules/Interface_RS485.md ##
+     @@ docs/modules/Interface_RS485.md: Examples of the configuration of these protocols:

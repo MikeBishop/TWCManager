@@ -1,0 +1,99 @@
+ 1:  dee7c52f <  -:  -------- Migrate held limits in one pass; chargeLimits is the waiting list
+ 2:  6e810e46 <  -:  -------- Compute the loaded VINs only at load; pin that a non-dict never waits
+ -:  -------- >  1:  3380ae70 Pin the one-pass held-limit migration's edge cases
+ -:  -------- >  2:  b89a4606 Pin that a non-dict chargeLimits never waits
+ 3:  a167a569 =  3:  c61aa149 The registry vehicle answers sync state; callers read registry fields, not CarApiVehicle
+ 4:  2192f9da =  4:  e8431f12 Pin TeslaAPI's read gates, expiry of a listed car and the unlocated broadcast
+ 5:  9401af27 =  5:  84308532 Make Forget atomic with a listing; attached() returns (vehicle, attachment) pairs
+ 6:  360fe6b8 =  6:  3fad19d7 Dissolve CarApiVehicle: TeslaAPI methods take the registry vehicle; its bookkeeping is an attached record; Forget is atomic
+ 7:  0b091af1 =  7:  2ed6b3a3 Never expire an attached car; pin the Fleet stop's no-answer leg; trim TeslaAPI
+ 8:  97916c49 !  8:  5e43c7f8 Guard the dissolved CarApiVehicle names; sweep comments and orphans
+    @@ Commit message
+     
+         Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+     
+    - ## CHANGELOG.md ##
+    -@@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+    - * Architecture
+    -     * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used read-only
+    -     * (@MikeBishop) - Saved Tesla tokens migrate to separate Owner and Fleet settings on first start; downgrading afterwards loses the Owner API token (#692)
+    --    * (@MikeBishop) - Held charge limits (the limit a car had before TWCManager changed it) migrate from settings `chargeLimits` to `heldLimits`, keyed by VIN, on first start; downgrading afterwards loses them, and upgrading again after a downgrade uses the held limits saved before the downgrade (the older release's `chargeLimits` is kept but ignored, with a warning)
+    -+    * (@MikeBishop) - Held charge limits (the limit a car had before TWCManager changed it) migrate from settings `chargeLimits` to `heldLimits`, keyed by VIN, on first start; downgrading afterwards loses them, and upgrading again after a downgrade uses the held limits saved before the downgrade (for a car the held limits already hold, the older release's `chargeLimits` entry is dropped without a warning; other cars' entries migrate as usual)
+    -     * (@MikeBishop) - TWC abstraction layer with EVSEController/EVSEInstance interface (ported from #483)
+    -     * (@ngardiner) - Gen3 TWC support via Neurio Modbus emulation
+    -     * (@MikeBishop) - Run vehicle commands on a dedicated worker thread and serialize tesla-control calls, so BLE retries no longer stall the RS485 loop (#668)
+    -
+      ## lib/TWCManager/TWCSlave.py ##
+     @@ lib/TWCManager/TWCSlave.py: class TWCSlave:
+              plugged, cars = self.pluggedCars()
+ 9:  ca9fcbc9 !  9:  4d545833 Trim dead and duplicated code left by the CarApiVehicle dissolution
+    @@ Commit message
+         the guard test now rejects .VIN). TeslaAPI drops the Vehicle import,
+         the shadowed enabled attribute and the dead __email/__password/__resp,
+         and folds update_vehicle_data's three missing-key error blocks into one
+    -    with the same messages (now pinned). HeldLimits shares its VIN-set
+    -    helper.
+    +    with the same messages (now pinned).
+     
+         Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+     
+    - ## lib/TWCManager/Vehicle/Reconcile/HeldLimits.py ##
+    -@@ lib/TWCManager/Vehicle/Reconcile/HeldLimits.py: def _encode(limit: HeldLimit) -> Dict[str, Any]:
+    -     return {"outside": limit.outside, "held": limit.held}
+    - 
+    - 
+    -+def _vins(store: Dict[Any, Any]) -> FrozenSet[Any]:
+    -+    return frozenset(k for k in store if isWellFormedVIN(str(k)))
+    -+
+    -+
+    - _MALFORMED = "Dropped a malformed chargeLimits entry for %s while migrating"
+    - _UNHELD = (
+    -     "Kept the normal limit but not the out-of-range held limit of the "
+    -@@ lib/TWCManager/Vehicle/Reconcile/HeldLimits.py: class HeldLimits:
+    -             settings = self.master.settings
+    -             legacy, store = settings.get(self.LEGACY_KEY), settings.get(self.KEY)
+    -             store = store if isinstance(store, dict) else {}
+    --            loaded = (
+    --                self._loadedVins
+    --                if final
+    --                else frozenset(k for k in store if isWellFormedVIN(str(k)))
+    --            )
+    -+            loaded = self._loadedVins if final else _vins(store)
+    -             if not isinstance(legacy, dict):
+    -                 if not final:
+    -                     self._loadedVins = loaded
+    -@@ lib/TWCManager/Vehicle/Reconcile/HeldLimits.py: class HeldLimits:
+    -                 del settings[self.LEGACY_KEY]
+    -             changed = keep != legacy
+    -             if not final:
+    --                self._loadedVins = frozenset(
+    --                    k for k in store if isWellFormedVIN(str(k))
+    --                )
+    -+                self._loadedVins = _vins(store)
+    -         for args in warnings:
+    -             logger.warning(*args)
+    -         for args in infos:  # either way one saved normal limit is discarded
+    -
+      ## lib/TWCManager/Vehicle/TeslaAPI.py ##
+     @@ lib/TWCManager/Vehicle/TeslaAPI.py: from TWCManager.Vehicle.Reconcile.Outcome import (
+          Outcome,
+10:  b3b108c3 = 10:  8574d8f9 Let the Owner API command cars Tesla lists with command_signing off (#659)
+11:  dd58b74b = 11:  507f0888 Pin owner-only "off" car parity with Fleet-only command paths (#659)
+12:  fd7b2e33 ! 12:  d4c154b4 Document per-vehicle Owner API commands (#659)
+    @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+     -    * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used read-only
+     +    * Remove Tesla Owner API login flow; FleetAPI, TeslaMate token sync, manual token entry and BLE remain the supported paths, with Owner API tokens used for reads, and for commands only to vehicles Tesla reports with `command_signing: off`
+          * (@MikeBishop) - Saved Tesla tokens migrate to separate Owner and Fleet settings on first start; downgrading afterwards loses the Owner API token (#692)
+    -     * (@MikeBishop) - Held charge limits (the limit a car had before TWCManager changed it) migrate from settings `chargeLimits` to `heldLimits`, keyed by VIN, on first start; downgrading afterwards loses them, and upgrading again after a downgrade uses the held limits saved before the downgrade (for a car the held limits already hold, the older release's `chargeLimits` entry is dropped without a warning; other cars' entries migrate as usual)
+    +     * (@MikeBishop) - Held charge limits in settings `chargeLimits` are keyed by VIN; entries keyed by the Tesla API's numeric vehicle ID are re-keyed when the vehicle list names them. A 1.3.x build still reads the VIN-keyed entries after a downgrade; re-keyed Tesla API entries won't match there
+          * (@MikeBishop) - TWC abstraction layer with EVSEController/EVSEInstance interface (ported from #483)
+     @@ CHANGELOG.md: This document logs the changes per release of TWCManager.
+          * (@MikeBishop) - Fix: A rejected pasted refresh token keeps the previous tokens, and a 401 on refresh clears the token type (#687)
+13:  48603376 = 13:  7efa8be9 Key the module read-only hint on the Fleet slot alone; one unknown-signing reason
+14:  d509e922 = 14:  7154f6b0 Compare per-desire paid records in the owner-only "off" parity row
+15:  810a3bc6 = 15:  9f0d7c47 Send Owner and Fleet commands in provider order, not Fleet first
+16:  68abde96 = 16:  6a4a888d Name the Owner API in the documented command order
+17:  4515efbd = 17:  1b82aad1 Log vehicle wake decisions at INFO
+18:  5df98114 = 18:  cee7a214 Pin the offline-wake follow-up for an Owner API car with signing off
+19:  a3b9c60d = 19:  ab6df576 Raise TeslaBLE's default command timeout to 15 s
+20:  54059990 <  -:  -------- Say why held limits moved to a new settings key

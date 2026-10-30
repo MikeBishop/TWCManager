@@ -33,7 +33,7 @@ def env(master):
     return e
 
 def master():
-    reg = VehicleRegistry({}); v = reg.getOrCreate(VIN, "TWC"); v.observe("name", "TestCar", "TeslaAPI"); v.claim("TeslaBLE", True, "paired")
+    reg = VehicleRegistry({}); v = reg.getOrCreate(VIN, "TWC"); v.observe("name", "<car>", "TeslaAPI"); v.claim("TeslaBLE", True, "paired")
     reg.beginPlugSession("8244")
     return SimpleNamespace(vehicleRegistry=reg, version="1.4.0", modules={}, settingsLock=threading.RLock(),
         getModuleByName=lambda name: None,
@@ -48,7 +48,7 @@ def test_held_limit_falls_back_to_api_numeric_id():                 # P11
 def test_list_renders_registry_rows():
     m = master()
     html = env(m).get_template("vehicles.html.j2").render(master=m, url=SimpleNamespace(path="/vehicles", query=""), addVehicleError="")
-    assert f"/vehicleDetail/{VIN}" in html and "TestCar" in html and "managed" in html
+    assert f"/vehicleDetail/{VIN}" in html and "<car>" in html and "managed" in html
     assert "TeslaBLE (paired)" in html and "90% (holding 80%)" in html
     assert "Unknown car on TWC 8244" in html and "Charge history" in html and 'action="/vehicle/add"' in html
 

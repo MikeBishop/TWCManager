@@ -1,0 +1,19 @@
+# Task 9 review (c398f77f..3d53fd62)
+Spec compliance: PASS. Quality: APPROVE with fixes. (Tests not run: no pytest in this environment; read only.)
+
+Findings, ranked
+1. Important: watchLine shows "via None" for a watched car with no source. Watch.status sets watched=True when why == NO_SOURCE, with via=None, last="" and lastAt=None, so the cell reads "Watched: no answer never via None; budget $x". Render the NO_SOURCE case as "Not watched: no status source", or omit "via" when via is None. Not tested.
+2. Minor: a status() exception raises in the Jinja global and 500s the whole Vehicles page; providerLines and presence have the same exposure, so it is consistent. status() takes only the watch's own leaf lock, so I/O risk is nil.
+3. Minor: the launcher-order test (src.index(a) < src.index(b)) is a string-position check. It passes even if both lines sit in dead code, but it guards a real regression (a tick that starts with watch=None). Acceptable.
+4. Minor: the launcherFunction exec test is workable but brittle. It needs `global config, master` to keep working and breaks on any new module-level name that check_green_energy uses. Cheap better seam: move the EMS poll plus the loadSample call into a TWCMaster method (e.g. master.pollEMS()), with the launcher's check_green_energy keeping only the policy part. Then test it with a real TWCMaster and no source reading. It is not worth blocking for.
+5. Minor: `getattr(master, "watch", None)` in check_green_energy and updateChargeAtHome is redundant now that TWCMaster.watch defaults to None. It is harmless, but the "set by the launcher" comment makes the guard look deliberate. The None guard is still needed: the background thread starts before master.watch is assigned.
+6. The power-start hop (background_tasks_thread -> updateChargeAtHome -> readNow) is untested at the dispatch line only. That line is a one-line `if cmd == checkCharge`, and both ends are tested elsewhere. Acceptable.
+
+Checks
+- Ordering: master.watch is built after loadSettings (:786), registerProviders (:757) and module load, and after TWCMaster.__init__ has the registry and config. Watch.__init__ reads config and getVoltageMeasurement, which needs no module. TeslaBLE is looked up lazily (_ble at use time). It is built before ControlTick.start(). OK.
+- A watch exception never stops controlPass: housekeeping wraps pass_ in _guarded, and pass_ also guards each _visit. The tick test covers the raise. I did not confirm whether housekeeping runs before or after controlPass, but either way the error is isolated.
+- Disabled: pass_ returns early. notWatched returns "disabled", so _watched() is empty and loadSample/readNow find nothing to ask. Tested.
+- Cell text: not watched, watched with nextAt None (the ", next" part is omitted), with via, and with lastAt None ("never") are covered. nextAt in the past gives "next in 0 min". The only gap is finding 1.
+- Template global: only the in-memory status() plus watchBudget.tokens(); no I/O.
+- Task 6c: the reason did not land on the Vehicles list page; it is on the vehicle detail page. vehicleDetail.html.j2 :141 appends "(scanning unavailable)" to the BLE Status, and :158-168 swaps the Scan button for "No range scan: <scanBlocked>". The brief said "Vehicles page ... where the Scan button is"; that button is on the detail page, so this is faithful. It is consistent with the new Watch cell: the cell is a summary, and the detail page carries the reason. The cell does not say why a lost car is not being scanned. Optional: link the cell to detail.
+- Comment rule: comments explain why ("Nothing is due for a lost car known asleep", "Last, so a fault in the watch never costs the offer", "Set by the launcher once the master can be measured") and none narrate history. "Set by the launcher once the master can be measured" is slightly stale as a reason, since the master is constructible earlier; consider "the launcher builds it after settings and modules load".

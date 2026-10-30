@@ -576,9 +576,9 @@ def test_liveness_feeds_vehicle_age_and_trust():
     assert v.age("chargeLimit") == 900.0 and r.sourceLiveAt("TeslaAPI", v) is NOT_TRACKED
 
 def test_find_by_name_and_attached():
-    r = VehicleRegistry({}); v = r.getOrCreate(VIN, "TeslaAPI"); v.observe("name", "TestCar", "TeslaAPI")
+    r = VehicleRegistry({}); v = r.getOrCreate(VIN, "TeslaAPI"); v.observe("name", "<car>", "TeslaAPI")
     v.attach("TeslaAPI", "obj")
-    assert r.findByName("TestCar") is v and r.findByName("x") is None
+    assert r.findByName("<car>") is v and r.findByName("x") is None
     assert r.attached("TeslaAPI") == ["obj"] and r.attached("HomeAssistant") == []
 ```
 
@@ -820,9 +820,9 @@ def api_with_registry():
 
 def test_vehicle_joins_registry_and_claims_teslaapi():
     api, reg = api_with_registry()
-    api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+    api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
     v = reg.get(VIN)
-    assert v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "TestCar"
+    assert v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "<car>"
     api.fleetSlot.clear()
     assert v.tier == "observed"            # no command slot: read-only
     api.fleetSlot.setTokens(fleet_token())
@@ -1057,14 +1057,14 @@ def test_vin_keyed_telemetry_creates_registry_vehicle_and_observes_with_source()
     t, reg = make(); t.vinFor = lambda vid: VIN
     t.applyDataToVehicle("1", "charge_limit_soc", "80")      # before the name: parked
     assert reg.vehicles() == [] and t.unknownVehicles["1"] == [["charge_limit_soc", "80"]]
-    t.applyDataToVehicle("1", "display_name", "TestCar")   # maps and replays at once
+    t.applyDataToVehicle("1", "display_name", "<car>")   # maps and replays at once
     v = reg.get(VIN)
-    assert v.name == "TestCar" and t.vehicles["1"] is v
+    assert v.name == "<car>" and t.vehicles["1"] is v
     assert (v.latest("chargeLimit").value, v.latest("chargeLimit").source) == (80, "Probe")
 
 def test_name_match_against_registry_without_cloud_list():
-    t, reg = make(); reg.getOrCreate(VIN, "TeslaBLE").observe("name", "TestCar", "TeslaAPI")
-    assert t.updateVehicles("1", "TestCar", loadList=False) is True
+    t, reg = make(); reg.getOrCreate(VIN, "TeslaBLE").observe("name", "<car>", "TeslaAPI")
+    assert t.updateVehicles("1", "<car>", loadList=False) is True
     assert t.vehicles["1"] is reg.get(VIN)
 
 def test_unidentifiable_car_is_parked_and_never_raises():   # Review Focus 4
@@ -1079,7 +1079,7 @@ def test_task9_legacy_sync_names_are_gone():
 
 def test_connection_state_is_the_feed_liveness():
     t, reg = make(); t.vinFor = lambda vid: VIN
-    t.applyDataToVehicle("1", "display_name", "TestCar"); v = reg.get(VIN)
+    t.applyDataToVehicle("1", "display_name", "<car>"); v = reg.get(VIN)
     v.observe("chargeLimit", 50, "Probe", at=0.0)
     assert reg.sourceLiveAt("Probe") is None and v.age("chargeLimit") > 1e6     # not connected yet
     t.mqttConnect(None, None, None, 0)
@@ -1458,7 +1458,7 @@ def env(master):
     return e
 
 def master():
-    reg = VehicleRegistry({}); v = reg.getOrCreate(VIN, "TWC"); v.observe("name", "TestCar", "TeslaAPI"); v.claim("TeslaBLE", True, "paired")
+    reg = VehicleRegistry({}); v = reg.getOrCreate(VIN, "TWC"); v.observe("name", "<car>", "TeslaAPI"); v.claim("TeslaBLE", True, "paired")
     reg.beginPlugSession("8244")
     return SimpleNamespace(vehicleRegistry=reg, version="1.4.0", modules={}, settingsLock=threading.RLock(),
         getModuleByName=lambda name: None,
@@ -1473,7 +1473,7 @@ def test_held_limit_falls_back_to_api_numeric_id():                 # P11
 def test_list_renders_registry_rows():
     m = master()
     html = env(m).get_template("vehicles.html.j2").render(master=m, url=SimpleNamespace(path="/vehicles", query=""), addVehicleError="")
-    assert f"/vehicleDetail/{VIN}" in html and "TestCar" in html and "managed" in html
+    assert f"/vehicleDetail/{VIN}" in html and "<car>" in html and "managed" in html
     assert "TeslaBLE (paired)" in html and "90% (holding 80%)" in html
     assert "Unknown car on TWC 8244" in html and "Charge history" in html and 'action="/vehicle/add"' in html
 

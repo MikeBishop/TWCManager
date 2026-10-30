@@ -1,0 +1,73 @@
+     1	dad641d7 Read config defaults with .get and create settings nodes in one line
+     2	d0d3a592 Drop a stale comment in the Kostal config read
+     3	3db1f483 Log reconciler outcomes, paid Tesla requests and telemetry plug changes at INFO
+     4	a6022740 Log telemetry changes only for live values; pin the free-request count
+     5	4ae74b35 Compute presence from plug, drive, position and BLE events; one home check for every module
+     6	6f899ce8 Trim presence; learn home from a fix while a TWC names the car
+     7	3326df16 Keep the BLE absence and empty TeslaMate payload guards
+     8	1632275f One applicability rule per message; BLE ping for a presumed car; holds wait for evidence within the paid budget
+     9	f353d639 Count only paid requests made; holds name their cell
+    10	2cefaa76 Restore the car's limit whenever the policy has none
+    11	d7e18016 Apply a policy with no limit as a release of the car's own limit
+    12	ad6f74ef Never wake for a raise while the car's point is offered nothing
+    13	2d6e6d0b Drop package re-exports nobody imports
+    14	2d042527 Trim the desired store and provider declarations
+    15	a3cbf1be Drop dead Gen3 setAmps; one source for a desire's fresh fields
+    16	b361875b Keep a vehicle's fields on the vehicle
+    17	dd992d32 Set write stamps through the clock; read an age's observation once
+    18	2ebfc539 Remove read and settings-key leftovers
+    19	a43e8a4e Refuse Forget on a paired record without the BLE module
+    20	bd5cb457 Gen2 unplug: a debounced 00 whose first heartbeat drops the slave's max amps from above 0 to 0, unless live telemetry says plugged in
+    21	fa0ab803 Point commands always apply; plugged follows plug and unplug events
+    22	f9fecbdd Keep a newer unplugged reading over a stale TWC naming; trim
+    23	6963e4a4 Attribute a VIN-less plug with one picker for Gen2 and Gen3; fan out only to cars plugged in here
+    24	59d6584e Never read BLE from the Gen3 vitals; Gen2 plug counts only while the point reports one
+    25	e9d2a813 Show presence and pending commands on the Vehicles pages
+    26	da198c2e Pending commands as one line each; finish the summary trim
+    27	5a1e908c Import vehicle-model modules by name
+    28	a2af43c5 Trim comments that restate the code
+    29	9dfb12f4 Document event-based presence
+    30	207f98c5 Name the zero-age location read test for what it checks
+    31	06f192b7 Never attribute a plug to a car its live feed reads unplugged
+    32	7a18ff63 Date a home fix by its GPS time; correct the home and placement docs
+    33	37cc9094 Attribute a VIN-less plug once across a waking car's 00 flicker
+    34	6ab5fc52 Re-arm the link grace when a known TWC links again
+    35	2f6113b0 Count paid requests under the vehicle lock
+    36	12031c9a Find a charging point's cars once per control pass
+    37	fc751c59 Inline the one-line homeForLimits alias
+    38	6704fdb0 Say which threads scan under the BLE lock
+    39	7c503a62 Leave a sleeping car alone until it shows life or must wake
+    40	cc97f3f7 A sleeping car wakes for a raise once offered; a wake or a feed's driving outranks BLE state
+    41	a63e70ac Document leaving a sleeping car alone; how home is learned
+    42	8065c4d6 Run BLE scans and attribution reads on the BLE worker
+    43	a298c10f Attribution sends nothing to a car already at its held limit; trim BLE jobs
+    44	c02cd836 Pending commands list a settled desire the car has drifted from
+    45	84994a2b Shorten the held charge limit on the Vehicles list
+    46	bde1f152 Attribute a VIN-less plug on a Gen2 that reads VINs
+    47	3dbe032b Say where a Gen2's match runs
+    48	dd7eaa56 Wake a car only when it is expected to charge
+    49	da500aa1 An unplugged car at home is not expected to charge
+    50	977860d7 Log a repeated hold at DEBUG
+    51	c41e775e Try BLE first when a car comes back
+    52	0251646b Restore at the drive start, while BLE is still in range
+    53	c7410df0 Hold a driving car without re-planning; trim
+    54	05a63b1c Name a plug-in the feed has not reported yet
+    55	c8d82ee1 Hold a driving or away car before any BLE run
+    56	23ea9d27 Keep a just-unplugged or other-charger car out of a plug's match
+    57	6d6caaef Wait for telemetry before waking after a start
+    58	90d0fbb5 Count a successful BLE range scan as seeing the car
+    59	c73175d5 Keep the last BLE range scan across a restart
+    60	672f9846 Do not read a Gen2's attributed plug as a sign of life
+    61	2af06ecd A retained telemetry reading is not a sign of life
+    62	805c0e16 Only a charger that saw the plug counts it as life; tidy the scan record
+    63	b18262bf An unmatched plug session ends only on a filtered unplug
+    64	3b28a9e6 An unmatched point at 00 reports no car, like a named one
+    65	3b853066 Close an unmatched session on a clear unplug the filter cannot yet confirm
+    66	f5c6a769 Count a max that drops to 0 during a 00 run as an unplug
+    67	c4636385 Check the car on a Gen2 status change instead of filtering unplugs
+    68	8f76957d Check plugs past the read cache, once per event; trust a feed only for news
+    69	a5239e0c A retained feed reading is no plug answer; stamp the unplug at its reading
+    70	a4ee8ca0 A retained feed reading marks no plug event
+    71	873b83d3 Drop the timed departure reads
+    72	adb6a215 Compare a feed's plug change with its last live reading
+    73	4f2a3275 Fall back to the feed's last reading when no plug event is known

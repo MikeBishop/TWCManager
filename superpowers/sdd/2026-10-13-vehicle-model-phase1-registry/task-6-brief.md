@@ -91,9 +91,9 @@ def test_liveness_feeds_vehicle_age_and_trust():
     assert v.age("chargeLimit") == 900.0 and r.sourceLiveAt("TeslaAPI", v) is NOT_TRACKED
 
 def test_find_by_name_and_attached():
-    r = VehicleRegistry({}); v = r.getOrCreate(VIN, "TeslaAPI"); v.observe("name", "TestCar", "TeslaAPI")
+    r = VehicleRegistry({}); v = r.getOrCreate(VIN, "TeslaAPI"); v.observe("name", "<car>", "TeslaAPI")
     v.attach("TeslaAPI", "obj")
-    assert r.findByName("TestCar") is v and r.findByName("x") is None
+    assert r.findByName("<car>") is v and r.findByName("x") is None
     assert r.attached("TeslaAPI") == ["obj"] and r.attached("HomeAssistant") == []
 ```
 

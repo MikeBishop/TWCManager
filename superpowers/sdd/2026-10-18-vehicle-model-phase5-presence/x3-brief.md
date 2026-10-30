@@ -1,0 +1,4 @@
+# Task X3: fold FieldStore into Vehicle (audit A3, ≈ −35)
+Source of truth: /home/mbishop/github/TWCManager/.claude/worktrees/ble-threading-twcmanager-62cb96/.superpowers/sdd/2026-10-18-vehicle-model-phase5-presence/audit-report.md, finding **A3**. Keep a separate field lock (leaf-lock rule: the field lock is never held while taking another lock); keep Observation, FIELDS and constants in Fields.py. A5 (summary trim) is NOT in this task — Task 6 takes it.
+Base: branch vehicle-model/phase5 in the wt-vm5 worktree. No behaviour change: tests/unit + tests/EMS stay green; tests/unit/test_command_path_parity.py counts and timings untouched. Comment rule applies (why, not history; no phase/PR/ruling IDs). Report the lib delta (git diff --shortstat <BASE> -- lib, net) against the estimate; if you can't reach the estimate, say which item fell short and why.
+Commit: "Keep a vehicle's fields on the vehicle"

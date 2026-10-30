@@ -13,7 +13,7 @@ Expected: startup logs include `BLE module initialized`, no `VehiclePresence` er
 
 - [ ] **Step 2: No wakes while parked and asleep**
 
-With the car parked at home and TeslaMate showing `asleep`, from a shell on the box run `curl -X POST http://127.0.0.1:8088/api/checkArrival` and watch the journal.
+With the car parked at home and TeslaMate showing `asleep`, from a shell on the box run `curl -X POST http://<teslamate-host>:8088/api/checkArrival` and watch the journal.
 Expected: `BLE presence probe: <VIN> reachable, status VEHICLE_SLEEP_STATUS_ASLEEP` within ~5 s; no `state charge` read (`BLE charge state fetch` absent); no `wake` command; TeslaMate still shows `asleep` five minutes later. Response code 202.
 
 - [ ] **Step 3: Depart and return**

@@ -1,0 +1,5 @@
+# Task X2: Desired store and provider boilerplate (audit A2 + A4 + A10, ≈ −86)
+Source of truth: /home/mbishop/github/TWCManager/.claude/worktrees/ble-threading-twcmanager-62cb96/.superpowers/sdd/2026-10-18-vehicle-model-phase5-presence/audit-report.md, findings **A2**, **A4**, **A10** (read them in full; they carry the safety notes — e.g. newDesire must never touch inFlight, lastProvider, lastSentAt, pendingSave; keep adopt's ValueError; ampsRange helper must not be the base default).
+Base: branch vehicle-model/phase5 in the wt-vm5 worktree. No behaviour change: tests/unit + tests/EMS stay green; tests/unit/test_command_path_parity.py counts and timings untouched. Comment rule applies (why, not history; no phase/PR/ruling IDs). Report the lib delta (git diff --shortstat <BASE> -- lib, net) against the estimate; if you can't reach the estimate, say which item fell short and why.
+Test rewrites allowed only where the audit says (settled() asserts; C.Declaration(...) → plain Cost; the Gen2 setAmps test); no assertion may be loosened.
+Commit: "Trim the desired store and provider declarations"

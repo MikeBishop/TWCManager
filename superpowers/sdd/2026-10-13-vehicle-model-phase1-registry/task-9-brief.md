@@ -35,9 +35,9 @@ def api_with_registry():
 
 def test_vehicle_joins_registry_and_claims_teslaapi():
     api, reg = api_with_registry()
-    api.addVehicle({"id": 1, "vin": VIN, "display_name": "TestCar"})
+    api.addVehicle({"id": 1, "vin": VIN, "display_name": "<car>"})
     v = reg.get(VIN)
-    assert v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "TestCar"
+    assert v.attachment("TeslaAPI") is api.getCarApiVehicles()[0] and v.name == "<car>"
     api.fleetSlot.clear()
     assert v.tier == "observed"            # no command slot: read-only
     api.fleetSlot.setTokens(fleet_token())

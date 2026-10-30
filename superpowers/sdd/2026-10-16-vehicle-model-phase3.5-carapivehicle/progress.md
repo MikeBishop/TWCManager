@@ -73,3 +73,25 @@ Wake fix review: approve. Ruling F1: a spent arm whose last send was a failed wa
 Wake fix round 1: rebase/phase3 dc48ccdd (1782 passed, lib 27,302), rebase/phase3.5 a698f753 (1868 passed, lib 27,405). Worst case never-online limit+start: 7 wakes/4h then stop. rebase/* pushed as backup (new names; vehicle-model/* untouched).
 Wake fix re-review: all rulings applied; R1 (ERROR wake blocks re-arm) taken — one-line, closes the last stranded case. Round 2 dispatched.
 Wake fix round 2: rebase/phase3 3fcae411 (1783 passed, lib 27,303), rebase/phase3.5 5df98114 (1869 passed, lib 27,406). Controller read lib diff. Wake fix: complete. rebase/phase3, rebase/phase3.5 backup branches updated (force-with-lease, own backup refs).
+2026-10-17: vehicle-model/* force-pushed to rebased tips (phase1 ec8790ca, phase2 31e5d185, phase3 3fcae411, phase3.5 5df98114; old tips 8e07669/6a6c14e/db47522/5c133bef); rebase/* removed. Docs archived to fork branch docs/vehicle-model-planning f2be0f60.
+User 2026-10-17: PR titles by phase (not n/4); PR2 drops #374 and HA live claim; BLE default timeout → 15 s (dispatched, sonnet a466373fc6f346684, on phase3.5).
+BLE default timeout 15 s: a3b9c60 pushed (1869 passed). PR drafts updated.
+heldLimits rationale: CHANGELOG + HeldLimits header on phase3.5 (54059990, ff push); PR3 draft explains format change.
+User 2026-10-17: drop heldLimits rename — keep chargeLimits key + (outside, held) tuple keyed by VIN; absence = not overriding. Task 8 dispatched (opus) aa0681a07c855c6c8 on phase3 then rebase 3.5; force-push after review; box settings converted by hand at next deploy.
+Task 8: phase3 7ff8d9ae (1781 passed, lib 27,241 −62), phase3.5 ab6df576 (1866, 27,386 −21). Kept [outside,-1] when nothing held (Rules.decideChargeLimit uses outside for blind BLE applies). Review dispatched.
+Task 8 review: approve after Important (c6 removes entry). Ruling: entry stays once written ([outside,-1] = nothing held) — protects blind BLE applies — except Forget drops it. Fix round dispatched.
+User 2026-10-17: never write a charge limit when the current limit is unknown (any provider); current may come from any channel. → drop sendWhenUnknown; absence is the only 'nothing held'; remove entries. Task 8 fix round redirected.
+User UI notes 2026-10-17 → Task 9 brief (drop Tier, providers one per line, source names, rename Held limit). Dispatch after Task 8 lands on phase3.5. Open PRs not gated on midnight run (user).
+Task 9 brief + item 5 (capability instead of 'listed').
+Task 8 redirected round: phase3 a678b9b5 (1778, lib 27,215), phase3.5 6af811a1 (1863, 27,360); parity counts unchanged. Accepted: load drops nothing-held entries silently; expiry drops entry. Asked to fold log-test fix into 48b4ff9b so every 3.5 commit is green.
+Task 9 + item 7 (scan button stuck: auto-refresh while scanPending).
+Task 8 fold: phase3.5 ad029963 (1863 passed; every 3.5 commit green on affected tests). Re-review of redirect + Task 9 dispatched.
+Task 8 re-review: rule holds on every write path. Ruling F1: a load that drops nothing-held entries may save — dropping them is a real change, one write, harmless; the 'no save' requirement was only for clean files — accept. Nits 2/3 parked (keep '-1 sentinel' phrase removed: policy charge_limit -1 still exists). Task 8: complete.
+Task 9: b6a4d5f4 (1867 passed, lib +60 → 27,420). keepsAlive=False for telemetry claim (accepted: lastSeen keeps reported cars). Review dispatched.
+User 2026-10-17: Gen3 doc changes came in Phase 2 → separate follow-up PR (on top of phase3.5) after the stack opens, not Task 10 in 3.5.
+Gen3 docs: separate PR on top of phase2 (user); branch docs/gen3-vehicle-model; dispatched.
+Task 9 review: approved; 5e254a06 (tier deleted; 1866 passed; lib 27,414). Force-pushed phase3 a678b9b5, phase3.5 5e254a06.
+User: 'TeslaAPI' must never show as a source — Owner API or Fleet API. Fix dispatched (opus) aef12a9e9a41ab42f: observations record slot (OwnerAPI/FleetAPI). Gen3 docs: docs/gen3-vehicle-model 6f284ce9 (merge-tree clean vs phase3.5), not pushed.
+Source names: 1029809b (OwnerAPI/FleetAPI; syncSource stays internal 'TeslaAPI'; 1868 passed; lib 27,425). Pushed. Dev-box stale lastSeenSource accepted (refreshes on next sighting).
+2026-10-17: opened ngardiner/TWCManager#703 (phase1→main), #704 (phase2→phase1), #705 (phase3→phase2), #706 (phase3.5→phase3), #707 (Gen3 docs→phase2). Tracker updated. Close #702 if #706 merges first.
+Linked #703–#706 as GitHub stack #708 (gh stack link). #707 not in the stack (branches off phase2).
