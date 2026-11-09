@@ -75,7 +75,7 @@ Times are in seconds since the epoch (Unix time).
       wanted, the command in flight, if any, and since when; why it has not
       been sent, if it has not; and the last outcome.
     * `ble` is the car's Bluetooth status when the TeslaBLE module is loaded
-      (`null` otherwise): its pairing status and label, whether the car was in
+      and the car's VIN is known (`null` otherwise): its pairing status and label, whether the car was in
       range at the last scan and when that was, whether a scan is pending or
       possible, and the last pairing attempt.
     * `chargeSessions` is how many charge sessions the car has had here.

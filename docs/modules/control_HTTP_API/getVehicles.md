@@ -73,12 +73,19 @@ Times are in seconds since the epoch (Unix time).
   paid reads (see `watch.monthlyBudgetUSD` in Settings.md).
 * `spend` says whether this month's Fleet API spend (`fleet`, with a Fleet API
   token) and Fleet Telemetry cost (`telemetry`, with the Fleet Telemetry
-  module) are shown; `month` holds this month's totals when either is, and is
-  `null` otherwise.
+  module) are shown. When either is, `month` holds this month's totals, and is
+  `null` otherwise:
+    * `api` is the Fleet API spend and `telemetry` the approximate Fleet
+      Telemetry cost so far this month, in US dollars; `signals` is the number
+      of Fleet Telemetry signals received.
+    * `last` gives last month's totals, as `api` and `telemetry`.
+    * `pace` is where this month's `api` and `telemetry` would end at the rate
+      so far, with `by` the day the month ends (such as `Dec 1`). It is `null`
+      on the first day of the month.
 * `vehicles` lists each vehicle:
     * `key` identifies the vehicle: its VIN, or for a car known only by the TWC
-      it is on (`anonymous` true), a key naming that TWC. `point` is the TWC
-      the car is on, if known.
+      it is on (`anonymous` true), a key naming that TWC. `point` is the ID of
+      the TWC the car is on, if known.
     * `vin`, `name` and `appearance` are its VIN, its name and its looks
       (model, paint, wheels) for drawing it.
     * `presence` is `home`, `presumed` (probably home) or `notHome` (away).
@@ -93,5 +100,17 @@ Times are in seconds since the epoch (Unix time).
       `held` is that limit and `outside` the car's own limit, which it gets
       back when the hold ends. It is `null` otherwise.
     * `spend` is the car's share of this month's Fleet API and Fleet Telemetry
-      spend, when `spend` above says it is shown.
-* `history` gives each vehicle's charge sessions and total kWh charged here.
+      spend, when `spend` above says it is shown (`null` otherwise, and for a
+      car known only by its TWC):
+        * `api` and `telemetry` are the car's Fleet API spend and approximate
+          Fleet Telemetry cost this month, in US dollars.
+        * `requests` is the number of paid Fleet API requests for the car, and
+          `types` breaks them down by kind, costliest first: each has its
+          `kind`, `count`, `cost` (US dollars) and `last` (when the last one
+          was made).
+        * `signals` is the number of Fleet Telemetry signals received from the
+          car, and `fields` breaks them down by field, most first: each has its
+          `field` and `count`.
+        * `last` gives the car's totals last month, as `api` and `telemetry`.
+* `history` gives the charge sessions and total kWh charged here of each
+  vehicle that has charge history, keyed by VIN.

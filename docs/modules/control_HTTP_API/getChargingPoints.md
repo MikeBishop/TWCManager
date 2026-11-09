@@ -75,7 +75,8 @@ Times are in seconds since the epoch (Unix time).
     * `id` names the charging point.
     * `controllers` says what TWCManager controls it through: `Gen2TWCs`,
       `Gen3TWCs`, or `VehicleEndpoints` (the car itself sets the rate).
-    * `local` is true when a TWC on TWCManager's own bus is part of the point.
+    * `local` is true when a Gen2 or Gen3 TWC is part of the point, and false
+      for a point known only through the car.
     * `vin`, `name`, `anonymous` and `appearance` describe the car on the point,
       if known: its VIN (`null` when not known), its name, whether it is a car
       known only by the TWC it is on, and its looks (model, paint, wheels) for
