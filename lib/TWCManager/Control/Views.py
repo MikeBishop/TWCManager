@@ -3,6 +3,10 @@ import json
 import math
 import time
 
+from TWCManager.EVSEInstance.Gen2TWC import Gen2TWC
+from TWCManager.EVSEInstance.Gen3TWC import Gen3TWC
+from TWCManager.Vehicle.Reconcile.Desired import AMPS
+
 # Service start; folded into every fingerprint so a restart invalidates pages
 STARTED = time.time()
 
@@ -24,3 +28,102 @@ def jsonSafe(obj):
     if obj is None or isinstance(obj, (bool, int, str)):
         return obj
     return str(obj)
+
+
+def slaveTotals(master) -> dict:
+    # The "total" row of /api/getSlaveTWCs
+    totals = {
+        "carsCharging": 0,
+        "lastAmpsOffered": 0,
+        "lifetimekWh": 0,
+        "maxAmps": 0,
+        "reportedAmpsActual": 0,
+    }
+    for slaveTWC in master.getSlaveTWCs():
+        totals["carsCharging"] += slaveTWC.isCharging
+        totals["lastAmpsOffered"] += slaveTWC.lastAmpsOffered
+        totals["lifetimekWh"] += slaveTWC.lifetimekWh
+        totals["maxAmps"] += slaveTWC.maxAmps
+        totals["reportedAmpsActual"] += slaveTWC.reportedAmpsActual
+
+    # A car on a charger no TWC reports is offered its share as its own
+    # charge rate (its desired amps), which no slave carries; a car on a
+    # TWC is already in that TWC's offer
+    for point in master.chargingPoints():
+        if point.localEndpoints:
+            continue
+        for endpoint in point.vehicleEndpoints:
+            d = master.desired.get(endpoint.vehicle.key, AMPS)
+            totals["lastAmpsOffered"] += d.value if d else 0
+
+    return {
+        "carsCharging": totals["carsCharging"],
+        "lastAmpsOffered": round(totals["lastAmpsOffered"], 2),
+        "lifetimekWh": totals["lifetimekWh"],
+        "maxAmps": totals["maxAmps"],
+        "reportedAmpsActual": round(totals["reportedAmpsActual"], 2),
+        "TWCID": "total",
+    }
+
+
+def _member(point, kind):
+    return next((e for e in point.endpoints if isinstance(e, kind)), None)
+
+
+def _gen2View(twc) -> dict:
+    return {
+        "twcid": twc.twcid,
+        "state": twc.reportedState,
+        "version": twc.protocolVersion,
+        "lifetimekWh": twc.lifetimekWh,
+        "maxAmps": float(twc.maxAmps),
+        "lastHeardAt": twc.timeLastRx,
+        "currentVIN": twc.currentVIN,
+        "lastVIN": twc.lastVIN,
+        "chargingSince": twc.lastChargingStart if twc.lastChargingStart > 0 else None,
+    }
+
+
+def _pointView(master, point) -> dict:
+    # One charging point from cached state only: no read, no fetch
+    car = master.vehicleRegistry.get(point.key)
+    gen2, gen3 = _member(point, Gen2TWC), _member(point, Gen3TWC)
+    if gen2 is not None:
+        offered, drawn = gen2.lastAmpsOffered, gen2.reportedAmpsActual
+    elif gen3 is not None:
+        offered = gen3.convertWattsToAmps(getattr(gen3, "lastTarget", 0) or 0)
+        drawn = gen3.currentAmps
+    else:
+        offered = 0
+        for e in point.vehicleEndpoints:
+            d = master.desired.get(e.vehicle.key, AMPS)
+            offered += d.value if d else 0
+        drawn = (car.value("actualCurrent") if car else None) or 0
+    volts = point.currentVoltage
+    return {
+        "id": point.ID,
+        "controllers": point.controllers,
+        "local": bool(point.localEndpoints),
+        "vin": car.vin if car else None,
+        "name": car.name if car else "",
+        "anonymous": car.isAnonymous if car else False,
+        "appearance": car.appearance() if car else {},
+        "ampsOffered": float(offered),
+        "ampsDrawn": float(drawn),
+        "volts": list(volts),
+        "minAmps": float(point.convertWattsToAmps(point.minPower, volts)),
+        "maxAmps": float(point.convertWattsToAmps(point.maxPower, volts)),
+        "soc": car.value("batteryLevel") if car else None,
+        "chargeLimit": car.value("chargeLimit") if car else None,
+        "gen2": _gen2View(gen2) if gen2 is not None else None,
+    }
+
+
+def chargingPointsView(master) -> dict:
+    # /api/getChargingPoints: every charging point, for the home pages
+    return {
+        "fingerprint": fingerprint("home"),
+        "now": time.time(),
+        "points": [_pointView(master, p) for p in master.chargingPoints()],
+        "total": slaveTotals(master),
+    }
