@@ -281,7 +281,9 @@ def vehicleEntry(master, vehicle, fleet, telemetry, now=None) -> dict:
         "lastSeenAt": now - row["lastSeenAge"],
         "lastSeenSource": row["lastSeenSource"],
         "heldLimit": (
-            {"held": limit.held, "outside": limit.outside} if limit is not None else None
+            {"held": limit.held, "outside": limit.outside}
+            if limit is not None
+            else None
         ),
         "spend": (
             master.fleetSpend.car(vehicle.vin)
