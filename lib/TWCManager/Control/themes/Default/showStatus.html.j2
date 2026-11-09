@@ -76,7 +76,6 @@
                   <th width='4%'>Voltage<br />per Phase<br />1 / 2 / 3</th>
                   <th width='2%'>Last Heartbeat</th>
                   <th width='6%'>Vehicle Connected<br />Current / Last</th>
-                  <th width='2%'>Commands</th>
                 </tr>
               </thead>
               <tbody data-keyed-list="points" data-template="point-row"></tbody>
@@ -93,14 +92,6 @@
                 <td><span data-show=".gen2"><span data-field=".gen2.lastHeardAt" data-format="secondsSince"></span> sec</span></td>
                 <td>C: <span class='VINClick' data-field=".gen2.currentVIN" data-format="blank"></span><span class='VINClick' data-show=".gen2" data-show-if="not" data-field=".vin" data-format="blank"></span>
                 <br />L: <span class='VINClick' data-field=".gen2.lastVIN" data-format="blank"></span></td>
-                <td>
-                  <div class="dropdown">
-                    <button class="btn btn-secondary dropdown-toggle" type="button" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">Select</button>
-                    <div class="dropdown-menu">
-                      <a class="dropdown-item" href="#">Coming Soon</a>
-                    </div>
-                  </div>
-                </td>
               </tr>
               </template>
         <tr>

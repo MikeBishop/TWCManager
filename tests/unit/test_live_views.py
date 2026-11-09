@@ -623,6 +623,13 @@ def test_default_home_names_the_kind_and_has_no_picture(mixed_master):
     assert 'data-format="pointKind"' in html and "vehicleImage" not in html
 
 
+def test_default_home_has_no_placeholder_commands_column(mixed_master):
+    html = renderHome(mixed_master, "Default")
+    # The real Charge Now / Commands panel below the table stays
+    assert "Coming Soon" not in html and "dropdown-toggle" not in html
+    assert "<th width='2%'>Commands</th>" not in html and "Stop All Charging" in html
+
+
 def test_modern_home_draws_a_car_for_a_point_without_a_twc(mixed_master):
     html = renderHome(mixed_master, "Modern")
     assert "data-image" in html and "/static/js/vehicleImage.js" in html
