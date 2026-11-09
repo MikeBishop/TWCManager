@@ -92,5 +92,6 @@ Times are in seconds since the epoch (Unix time).
       amps, when it was last heard from, the VIN it reports now and the last
       one it reported, and when the current charge started (`null` when not
       charging).
-* `total` sums the charging points, in the same form as the total row of
-  [getSlaveTWCs](../Control_HTTP.md).
+* `total` is the total row of [getSlaveTWCs](../Control_HTTP.md), in the same
+  form: it sums the Gen2 TWCs, and its `lastAmpsOffered` also counts the amps
+  offered to points known only through the car. Gen3 TWCs are not included.
