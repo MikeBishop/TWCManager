@@ -498,3 +498,74 @@ def test_fingerprint_template_global(monkeypatch):
     assert fp("vehicles") == pageFingerprint(m, "vehicles")
     assert fp("vehicle", CAR) == pageFingerprint(m, "vehicle", CAR)
     assert fp("home") == fingerprint("home")
+
+
+# Home pages (both themes)
+
+
+def renderHome(m, theme):
+    from http.server import BaseHTTPRequestHandler
+    from TWCManager.Control.HTTPControl import CreateHTTPHandlerClass
+
+    m.settings["webControlTheme"] = theme
+    m.checkForUpdates = lambda: False
+    m.version = "1.4.0"
+    m.lastSaveFailed = False
+    with patch.object(BaseHTTPRequestHandler, "__init__", lambda *a, **k: None):
+        handler = CreateHTTPHandlerClass(m)()
+    handler.url = Mock(path="/")
+    handler.apiAvailable = False
+    return handler.templateEnv.get_template("main.html.j2").render(vars(handler))
+
+
+@pytest.mark.parametrize("theme", ["Default", "Modern"])
+def test_home_page_lists_points_live(theme, mixed_master):
+    html = renderHome(mixed_master, theme)
+    assert 'data-keyed-list="points"' in html and "/api/getChargingPoints" in html
+    assert "getSlaveTWCs" not in html and "setTimeout(request" not in html
+    assert pageFingerprint(mixed_master, "home") in html
+
+
+def test_default_home_names_the_kind_and_has_no_picture(mixed_master):
+    html = renderHome(mixed_master, "Default")
+    assert 'data-format="pointKind"' in html and "vehicleImage" not in html
+
+
+def test_modern_home_draws_a_car_for_a_point_without_a_twc(mixed_master):
+    html = renderHome(mixed_master, "Modern")
+    assert "data-image" in html and "/static/js/vehicleImage.js" in html
+
+
+def _resolves(node, path):
+    for seg in path.split("."):
+        if isinstance(node, list):
+            if not seg.isdigit() or int(seg) >= len(node):
+                return False
+            node = node[int(seg)]
+        elif isinstance(node, dict) and seg in node:
+            node = node[seg]
+        else:
+            return False
+    return True
+
+
+@pytest.mark.parametrize("theme", ["Default", "Modern"])
+def test_home_hooks_match_the_apis(theme, mixed_master):
+    import re
+
+    html = renderHome(mixed_master, theme)
+    mixed_master.getModuleByName("Policy").active_policy = "Solar"
+    data = dict(json.loads(callAPI(mixed_master, "/api/getStatus")[2]))
+    data.update(chargingPointsView(mixed_master))
+    gen2 = next(p for p in data["points"] if p["gen2"])
+    gen2["volts"] = [240.0, 239.0, 241.0]  # a three-phase TWC
+    paths = re.findall(r"data-(?:field|show|keyed-list)=['\"]([^'\"]+)['\"]", html)
+    assert paths
+    for path in paths:
+        if path.startswith("."):
+            assert _resolves(gen2, path[1:]), path
+        else:
+            assert _resolves(data, path), path
+    src = open("lib/TWCManager/Control/static/js/format.js").read()
+    for name in re.findall(r"data-(?:format|show-if)=['\"]([^'\"]+)['\"]", html):
+        assert "F." + name + " = function" in src, name
