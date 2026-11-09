@@ -90,8 +90,9 @@ def _gen2View(twc) -> dict:
 
 
 def _gen3View(unit) -> dict:
-    # From the cached vitals only; a field the vitals lack is None
-    vitals = unit.vitals
+    # From the cached vitals only; a field the vitals lack is None, and so is
+    # every vitals field after a failed fetch (the cache keeps the old ones)
+    vitals = unit.vitals if unit.isReachable else {}
     connected = vitals.get("vehicle_connected")
     return {
         "id": unit.ID,

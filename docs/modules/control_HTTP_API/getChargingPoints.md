@@ -117,7 +117,8 @@ Times are in seconds since the epoch (Unix time).
       ID, whether its last status read succeeded, and what that read said: the
       TWC's state as it reports it, whether a car is connected, and the energy
       delivered in the current session in Wh. Each of these is `null` when the
-      TWC has not reported it.
+      TWC has not reported it, and all three are `null` while its last status
+      read failed.
 * `total` adds up every listed point: `ampsOffered`, `ampsDrawn` and `maxAmps`
   (a Gen2 TWC's own maximum amps for a Gen2 point). `lifetimekWh` sums the
   Gen2 TWCs only, as only they report it. `carsCharging` is the number of listed

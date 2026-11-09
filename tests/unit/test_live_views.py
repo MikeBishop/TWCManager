@@ -52,7 +52,7 @@ def test_send_json_headers_and_safety():
 
 import pytest
 from unittest.mock import MagicMock, patch
-from TWCManager.Control.Views import _gen3View, chargingPointsView, slaveTotals
+from TWCManager.Control.Views import _gen3View, _pointView, chargingPointsView, slaveTotals
 from TWCManager.EVSEInstance.Gen3TWC import Gen3TWC
 from TWCManager.Vehicle.Reconcile.Desired import AMPS
 from TWCManager.Vehicle.Registry.Vehicle import Vehicle
@@ -136,7 +136,9 @@ def test_total_covers_every_point(mixed_master):
     vitals(u, True, 7.25)  # the Gen3's car takes 7.25 A of the 8 A offered
     view = chargingPointsView(mixed_master)
     kinds = sorted(p["controllers"][0] for p in view["points"])
-    assert kinds == ["Gen2TWCs", "Gen3TWCs"]  # the car on no TWC may be this one
+    # No car-only point: while the Gen3 has an unnamed car plugged in, that
+    # car could be any car at home, so no car is listed on its own
+    assert kinds == ["Gen2TWCs", "Gen3TWCs"]
     assert view["total"] == {
         "ampsOffered": 24.33,  # 16.333 + 8
         "ampsDrawn": 17.75,  # 10.5 + 7.25
@@ -184,6 +186,20 @@ def test_gen3_point_reports_its_cached_vitals(mixed_master):
         "sessionEnergyWh": 5123.4,
     }
     assert gen3["ampsDrawn"] == 16.0
+
+
+def test_gen3_after_a_failed_fetch_reports_no_vitals(mixed_master):
+    (u,) = mixed_master.getModuleByName("Gen3TWCs").devices()
+    rawVitals(u, {"vehicle_connected": True, "evse_state": 11,
+                  "session_energy_wh": 5123.4})
+    # An unreachable unit leaves the point list, so hold its point from before
+    point = next(x for x in mixed_master.chargingPoints() if u in x.endpoints)
+    with patch("urllib.request.urlopen", side_effect=OSError("timed out")):
+        assert u.refreshVitals() is False
+    assert u.vitals  # the cache still holds the last successful fetch
+    assert _pointView(mixed_master, point)["gen3"] == {"id": "Gen3TWC-10.0.0.1", "reachable": False,
+                            "state": None, "vehicleConnected": None,
+                            "sessionEnergyWh": None}
 
 
 def test_gen3_without_vitals_reports_none(idle_master):
