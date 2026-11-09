@@ -122,7 +122,7 @@ wcmanager/settings.json and try saving your settings again.</b>
                             <span data-field="chargerLoadWatts" data-format="powerValue">0.0</span>&nbsp;<span class="text-secondary" data-field="chargerLoadWatts" data-format="powerUnit"></span>
                         </div>
                         <div class="d-flex flex-row justify-content-center">
-                            <span class="text-muted" data-field="chargerLoadAmps">0.0</span>&nbsp;A&nbsp;|&nbsp;<span class="text-muted" data-field="total.lastAmpsOffered" data-format="fixed2">0</span>&nbsp;A&nbsp;offered
+                            <span class="text-muted" data-field="chargerLoadAmps">0.0</span>&nbsp;A&nbsp;|&nbsp;<span class="text-muted" data-field="total.ampsOffered" data-format="fixed2">0</span>&nbsp;A&nbsp;offered
                         </div>
                     </div>
                 </div>
@@ -173,7 +173,7 @@ wcmanager/settings.json and try saving your settings again.</b>
 
         <!-- TWC icon, or the car on a point without one -->
         <div class="col-1 text-center">
-            <div data-show=".local">
+            <div data-show=".hasTWC">
                 <svg height="4em" viewBox="0 0 78 142" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:1.5;">
                     <g transform="matrix(1,0,0,1,-58.6302,-49.9425)">
                         <g transform="matrix(1.25227,0,0,0.981636,-34.4875,13.0036)">
@@ -197,7 +197,7 @@ wcmanager/settings.json and try saving your settings again.</b>
                     </g>
                 </svg>
             </div>
-            <div data-show=".local" data-show-if="not">
+            <div data-show=".hasTWC" data-show-if="not">
                 <img class="vehicleImage" data-image hidden alt="" style="width: 100%; height: auto;">
             </div>
         </div>
@@ -213,6 +213,11 @@ wcmanager/settings.json and try saving your settings again.</b>
                 </div>
                 <div class="row">
                     <small>State <span data-field=".gen2.state" data-format="blank"></span></small>
+                </div>
+            </div>
+            <div data-show=".gen3">
+                <div class="row">
+                    <small>State <span data-field=".gen3.state" data-format="blank"></span></small>
                 </div>
             </div>
         </div>

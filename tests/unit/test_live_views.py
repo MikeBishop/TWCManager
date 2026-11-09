@@ -52,7 +52,7 @@ def test_send_json_headers_and_safety():
 
 import pytest
 from unittest.mock import MagicMock, patch
-from TWCManager.Control.Views import chargingPointsView, slaveTotals
+from TWCManager.Control.Views import _gen3View, chargingPointsView, slaveTotals
 from TWCManager.EVSEInstance.Gen3TWC import Gen3TWC
 from TWCManager.Vehicle.Reconcile.Desired import AMPS
 from TWCManager.Vehicle.Registry.Vehicle import Vehicle
@@ -60,12 +60,17 @@ from tests.unit.test_charging_points import VIN, VIN2, car, real
 from tests.unit.test_gen3twc_provider import vitals
 
 
-def emptyVitals(unit):
-    # A reachable unit whose vitals carry none of the fields read
+def rawVitals(unit, data):
+    # A successful fetch whose vitals are exactly data
     resp = MagicMock()
-    resp.__enter__.return_value.read.return_value = b"{}"
+    resp.__enter__.return_value.read.return_value = json.dumps(data).encode()
     with patch("urllib.request.urlopen", return_value=resp):
         assert unit.refreshVitals()
+
+
+def emptyVitals(unit):
+    # A reachable unit whose vitals carry none of the fields read
+    rawVitals(unit, {})
 
 
 def withGen2AndCars(m):
@@ -115,12 +120,71 @@ def test_points_list_every_kind(mixed_master):  # one Gen2 with car, one Gen3, o
     assert ("Gen3TWCs",) in kinds and ("VehicleEndpoints",) in kinds
     gen2 = next(p for p in view["points"] if p["gen2"])
     assert gen2["gen2"]["twcid"] == "8244" and gen2["vin"] == VIN
-    assert gen2["local"] is True and gen2["ampsOffered"] == 16.333
+    assert gen2["hasTWC"] is True and gen2["ampsOffered"] == 16.333
     assert gen2["ampsDrawn"] == 10.5 and gen2["gen2"]["chargingSince"] is None
     car = next(p for p in view["points"] if p["controllers"] == ["VehicleEndpoints"])
-    assert car["local"] is False and car["ampsOffered"] == 16  # its desired AMPS
-    assert car["gen2"] is None and car["vin"] == VIN2
-    assert view["total"] == slaveTotals(mixed_master)
+    assert car["hasTWC"] is False and car["ampsOffered"] == 16  # its desired AMPS
+    assert car["gen2"] is None and car["gen3"] is None and car["vin"] == VIN2
+    assert gen2["gen3"] is None
+    gen3 = next(p for p in view["points"] if p["controllers"] == ["Gen3TWCs"])
+    assert gen3["hasTWC"] is True and gen3["gen2"] is None and gen3["gen3"]
+
+
+def test_total_covers_every_point(mixed_master):
+    (u,) = mixed_master.getModuleByName("Gen3TWCs").devices()
+    u.lastTarget = u.convertAmpsToWatts(8, u.currentVoltage)
+    vitals(u, True, 7.25)  # the Gen3's car takes 7.25 A of the 8 A offered
+    view = chargingPointsView(mixed_master)
+    kinds = sorted(p["controllers"][0] for p in view["points"])
+    assert kinds == ["Gen2TWCs", "Gen3TWCs"]  # the car on no TWC may be this one
+    assert view["total"] == {
+        "ampsOffered": 24.33,  # 16.333 + 8
+        "ampsDrawn": 17.75,  # 10.5 + 7.25
+        "maxAmps": 128.0,  # the Gen2's own 80 A, the Gen3's 48 A fuse
+        "lifetimekWh": 1234,  # Gen2 TWCs only
+        "carsCharging": 1,
+    }
+    # /api/getSlaveTWCs keeps its own total
+    total = json.loads(callAPI(mixed_master, "/api/getSlaveTWCs")[2])["total"]
+    assert total == slaveTotals(mixed_master) and total["TWCID"] == "total"
+
+
+def test_total_counts_a_point_known_only_through_the_car(mixed_master):
+    view = chargingPointsView(mixed_master)
+    car = next(p for p in view["points"] if p["controllers"] == ["VehicleEndpoints"])
+    total = view["total"]
+    assert total["ampsOffered"] == 32.33  # the Gen2's 16.333, the car's 16
+    assert total["maxAmps"] == round(80 + 48 + car["maxAmps"], 2)
+
+
+def test_gen3_point_reports_its_cached_vitals(mixed_master):
+    (u,) = mixed_master.getModuleByName("Gen3TWCs").devices()
+    rawVitals(u, {"vehicle_connected": True, "vehicle_current_a": 16.0,
+                  "grid_v": 240.0, "evse_state": 11, "session_energy_wh": 5123.4,
+                  "session_s": 1200})
+    view = chargingPointsView(mixed_master)
+    gen3 = next(p for p in view["points"] if p["controllers"] == ["Gen3TWCs"])
+    assert gen3["gen3"] == {
+        "id": "Gen3TWC-10.0.0.1",
+        "reachable": True,
+        "state": 11,  # raw, as the unit reports it
+        "vehicleConnected": True,
+        "sessionEnergyWh": 5123.4,
+    }
+    assert gen3["ampsDrawn"] == 16.0
+
+
+def test_gen3_without_vitals_reports_none(idle_master):
+    view = chargingPointsView(idle_master)  # its vitals carry no field
+    gen3 = next(p for p in view["points"] if p["controllers"] == ["Gen3TWCs"])
+    assert gen3["gen3"] == {"id": "Gen3TWC-10.0.0.1", "reachable": True,
+                            "state": None, "vehicleConnected": None,
+                            "sessionEnergyWh": None}
+    # A unit never yet heard from is not a point; its view is all unknown
+    unit = real(gen3=True).getModuleByName("Gen3TWCs").devices()[0]
+    assert _gen3View(unit) == {"id": "Gen3TWC-10.0.0.1", "reachable": False,
+                               "state": None, "vehicleConnected": None,
+                               "sessionEnergyWh": None}
 
 
 def test_points_with_missing_facts(idle_master):  # Review Focus 4
@@ -559,10 +623,13 @@ def test_home_hooks_match_the_apis(theme, mixed_master):
     data.update(chargingPointsView(mixed_master))
     gen2 = next(p for p in data["points"] if p["gen2"])
     gen2["volts"] = [240.0, 239.0, 241.0]  # a three-phase TWC
+    gen3 = next(p for p in data["points"] if p["gen3"])
     paths = re.findall(r"data-(?:field|show|keyed-list)=['\"]([^'\"]+)['\"]", html)
-    assert paths
+    assert paths and any(p.startswith(".gen3.") for p in paths)
     for path in paths:
-        if path.startswith("."):
+        if path.startswith(".gen3"):
+            assert _resolves(gen3, path[1:]), path
+        elif path.startswith("."):
             assert _resolves(gen2, path[1:]), path
         else:
             assert _resolves(data, path), path

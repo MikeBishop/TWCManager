@@ -26,7 +26,7 @@ curl -X GET http://192.168.1.1:8080/api/getChargingPoints
         {
             "id": "Point-Gen2TWC-4142",
             "controllers": ["Gen2TWCs"],
-            "local": true,
+            "hasTWC": true,
             "vin": "5YJ3E1EA1KF000001",
             "name": "Model 3",
             "anonymous": false,
@@ -48,16 +48,40 @@ curl -X GET http://192.168.1.1:8080/api/getChargingPoints
                 "currentVIN": "5YJ3E1EA1KF000001",
                 "lastVIN": "5YJ3E1EA1KF000001",
                 "chargingSince": 1794191756.0
+            },
+            "gen3": null
+        },
+        {
+            "id": "Point-anon:Gen3TWC-192.168.1.50",
+            "controllers": ["Gen3TWCs"],
+            "hasTWC": true,
+            "vin": null,
+            "name": "",
+            "anonymous": true,
+            "appearance": {},
+            "ampsOffered": 8.0,
+            "ampsDrawn": 7.9,
+            "volts": [240.0, 0.0, 0.0],
+            "minAmps": 6.0,
+            "maxAmps": 48.0,
+            "soc": null,
+            "chargeLimit": null,
+            "gen2": null,
+            "gen3": {
+                "id": "Gen3TWC-192.168.1.50",
+                "reachable": true,
+                "state": 11,
+                "vehicleConnected": true,
+                "sessionEnergyWh": 2350.5
             }
         }
     ],
     "total": {
-        "carsCharging": 1,
-        "lastAmpsOffered": 16.0,
+        "ampsOffered": 24.0,
+        "ampsDrawn": 23.7,
+        "maxAmps": 128.0,
         "lifetimekWh": 1520,
-        "maxAmps": 80.0,
-        "reportedAmpsActual": 15.8,
-        "TWCID": "total"
+        "carsCharging": 1
     }
 }
 ```
@@ -72,7 +96,7 @@ Times are in seconds since the epoch (Unix time).
     * `id` names the charging point.
     * `controllers` says what TWCManager controls it through: `Gen2TWCs`,
       `Gen3TWCs`, or `VehicleEndpoints` (the car itself sets the rate).
-    * `local` is true when a Gen2 or Gen3 TWC is part of the point, and false
+    * `hasTWC` is true when a Gen2 or Gen3 TWC is part of the point, and false
       for a point known only through the car.
     * `vin`, `name`, `anonymous` and `appearance` describe the car on the point,
       if known: its VIN (`null` when not known), its name, whether it is a car
@@ -89,6 +113,12 @@ Times are in seconds since the epoch (Unix time).
       amps, when it was last heard from, the VIN it reports now and the last
       one it reported, and when the current charge started (`null` when not
       charging).
-* `total` is the total row of [getSlaveTWCs](../Control_HTTP.md), in the same
-  form: it sums the Gen2 TWCs, and its `lastAmpsOffered` also counts the amps
-  offered to points known only through the car. Gen3 TWCs are not included.
+    * `gen3` is `null` unless the point is a Gen3 TWC. Then it gives the TWC's
+      ID, whether its last status read succeeded, and what that read said: the
+      TWC's state as it reports it, whether a car is connected, and the energy
+      delivered in the current session in Wh. Each of these is `null` when the
+      TWC has not reported it.
+* `total` adds up every listed point: `ampsOffered`, `ampsDrawn` and `maxAmps`
+  (a Gen2 TWC's own maximum amps for a Gen2 point). `lifetimekWh` sums the
+  Gen2 TWCs only, as only they report it. `carsCharging` is the number of cars
+  charging now, as [getStatus](../Control_HTTP.md) gives it.

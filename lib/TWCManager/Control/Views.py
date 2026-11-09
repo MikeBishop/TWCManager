@@ -89,6 +89,19 @@ def _gen2View(twc) -> dict:
     }
 
 
+def _gen3View(unit) -> dict:
+    # From the cached vitals only; a field the vitals lack is None
+    vitals = unit.vitals
+    connected = vitals.get("vehicle_connected")
+    return {
+        "id": unit.ID,
+        "reachable": unit.isReachable,
+        "state": vitals.get("evse_state"),
+        "vehicleConnected": None if connected is None else bool(connected),
+        "sessionEnergyWh": vitals.get("session_energy_wh"),
+    }
+
+
 def _pointView(master, point) -> dict:
     # One charging point from cached state only: no read, no fetch
     car = master.vehicleRegistry.get(point.key)
@@ -108,7 +121,7 @@ def _pointView(master, point) -> dict:
     return {
         "id": point.ID,
         "controllers": point.controllers,
-        "local": bool(point.localEndpoints),
+        "hasTWC": bool(point.localEndpoints),
         "vin": car.vin if car else None,
         "name": car.name if car else "",
         "anonymous": car.isAnonymous if car else False,
@@ -121,16 +134,32 @@ def _pointView(master, point) -> dict:
         "soc": car.value("batteryLevel") if car else None,
         "chargeLimit": car.value("chargeLimit") if car else None,
         "gen2": _gen2View(gen2) if gen2 is not None else None,
+        "gen3": _gen3View(gen3) if gen3 is not None else None,
+    }
+
+
+def pointsTotal(master, points) -> dict:
+    # The total row over the listed points; lifetime kWh only Gen2 TWCs report
+    return {
+        "ampsOffered": round(sum(p["ampsOffered"] for p in points), 2),
+        "ampsDrawn": round(sum(p["ampsDrawn"] for p in points), 2),
+        "maxAmps": round(
+            sum(p["gen2"]["maxAmps"] if p["gen2"] else p["maxAmps"] for p in points),
+            2,
+        ),
+        "lifetimekWh": sum(p["gen2"]["lifetimekWh"] for p in points if p["gen2"]),
+        "carsCharging": master.num_cars_charging_now(),
     }
 
 
 def chargingPointsView(master) -> dict:
     # /api/getChargingPoints: every charging point, for the home pages
+    points = [_pointView(master, p) for p in master.chargingPoints()]
     return {
         "fingerprint": pageFingerprint(master, "home"),
         "now": time.time(),
-        "points": [_pointView(master, p) for p in master.chargingPoints()],
-        "total": slaveTotals(master),
+        "points": points,
+        "total": pointsTotal(master, points),
     }
 
 
