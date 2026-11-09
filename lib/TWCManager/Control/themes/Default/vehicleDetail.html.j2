@@ -178,7 +178,7 @@
               <span data-show="vehicle.ble.scanPending" hidden><input type=submit value="Scanning…" disabled></span>
               <span data-show="vehicle.ble.scanPending" data-show-if="not" hidden><input type=submit value="Scan for vehicle"></span>
             </form>
-            <small data-field="vehicle.ble" data-format="bleScanBlocked" data-show="vehicle.ble.scanBlocked" hidden></small>
+            <small data-field="vehicle.ble" data-format="bleScanBlocked" data-show="vehicle.ble" data-show-if="bleScanBlocked" hidden></small>
             <form method=POST action=/vehicle/localMgmt>
               <input type=hidden name="operation" value="pair" />
               <input type=hidden name="vin" value="{{ vin }}" />

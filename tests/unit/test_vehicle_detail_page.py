@@ -65,7 +65,7 @@ def test_the_reason_no_scan_is_possible_is_a_hook():
     html = render(withBLE(master()))
     assert (
         'data-field="vehicle.ble" data-format="bleScanBlocked"'
-        ' data-show="vehicle.ble.scanBlocked"' in html
+        ' data-show="vehicle.ble" data-show-if="bleScanBlocked"' in html
     )
 
 
