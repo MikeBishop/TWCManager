@@ -10,14 +10,12 @@ current. No token or other secret is ever included.
 
 ## Format of request
 
-The getVehicle API command takes the VIN as the last part of its path, and is
-not accompanied by any payload. You should send a blank payload when
-requesting this command.
+The getVehicle API command takes the VIN as the last part of its path.
 
 An example of how to call this function via cURL is:
 
 ```
-curl -X GET -d "" http://192.168.1.1:8080/api/getVehicle/5YJ3E1EA1KF000001
+curl -X GET http://192.168.1.1:8080/api/getVehicle/5YJ3E1EA1KF000001
 ```
 
 A VIN TWCManager does not know returns status 404.

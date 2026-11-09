@@ -10,13 +10,10 @@ reads this command every few seconds to keep itself current.
 
 ## Format of request
 
-The getChargingPoints API command is not accompanied by any payload. You should
-send a blank payload when requesting this command.
-
 An example of how to call this function via cURL is:
 
 ```
-curl -X GET -d "" http://192.168.1.1:8080/api/getChargingPoints
+curl -X GET http://192.168.1.1:8080/api/getChargingPoints
 ```
 
 ## Format of response
