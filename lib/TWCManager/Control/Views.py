@@ -138,17 +138,20 @@ def _pointView(master, point) -> dict:
     }
 
 
-def pointsTotal(master, points) -> dict:
+def pointsTotal(points) -> dict:
     # The total row over the listed points; lifetime kWh only Gen2 TWCs report
     return {
-        "ampsOffered": round(sum(p["ampsOffered"] for p in points), 2),
-        "ampsDrawn": round(sum(p["ampsDrawn"] for p in points), 2),
+        "ampsOffered": round(sum((p["ampsOffered"] for p in points), 0.0), 2),
+        "ampsDrawn": round(sum((p["ampsDrawn"] for p in points), 0.0), 2),
         "maxAmps": round(
-            sum(p["gen2"]["maxAmps"] if p["gen2"] else p["maxAmps"] for p in points),
+            sum(
+                (p["gen2"]["maxAmps"] if p["gen2"] else p["maxAmps"] for p in points),
+                0.0,
+            ),
             2,
         ),
         "lifetimekWh": sum(p["gen2"]["lifetimekWh"] for p in points if p["gen2"]),
-        "carsCharging": master.num_cars_charging_now(),
+        "carsCharging": sum(1 for p in points if p["ampsDrawn"] > 0),
     }
 
 
@@ -159,7 +162,7 @@ def chargingPointsView(master) -> dict:
         "fingerprint": pageFingerprint(master, "home"),
         "now": time.time(),
         "points": points,
-        "total": pointsTotal(master, points),
+        "total": pointsTotal(points),
     }
 
 

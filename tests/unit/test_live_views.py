@@ -142,7 +142,7 @@ def test_total_covers_every_point(mixed_master):
         "ampsDrawn": 17.75,  # 10.5 + 7.25
         "maxAmps": 128.0,  # the Gen2's own 80 A, the Gen3's 48 A fuse
         "lifetimekWh": 1234,  # Gen2 TWCs only
-        "carsCharging": 1,
+        "carsCharging": 2,  # both points draw current
     }
     # /api/getSlaveTWCs keeps its own total
     total = json.loads(callAPI(mixed_master, "/api/getSlaveTWCs")[2])["total"]
@@ -155,6 +155,18 @@ def test_total_counts_a_point_known_only_through_the_car(mixed_master):
     total = view["total"]
     assert total["ampsOffered"] == 32.33  # the Gen2's 16.333, the car's 16
     assert total["maxAmps"] == round(80 + 48 + car["maxAmps"], 2)
+
+
+def test_total_with_no_points_is_zero_floats():
+    total = chargingPointsView(real())["total"]
+    assert total == {"ampsOffered": 0.0, "ampsDrawn": 0.0, "maxAmps": 0.0,
+                     "lifetimekWh": 0, "carsCharging": 0}
+    assert all(isinstance(total[k], float) for k in ("ampsOffered", "ampsDrawn", "maxAmps"))
+
+
+def test_cars_charging_counts_points_drawing_current(idle_master):
+    view = chargingPointsView(idle_master)  # idle Gen2, Gen3 with empty vitals
+    assert view["total"]["carsCharging"] == 0
 
 
 def test_gen3_point_reports_its_cached_vitals(mixed_master):

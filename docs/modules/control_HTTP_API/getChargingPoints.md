@@ -81,7 +81,7 @@ curl -X GET http://192.168.1.1:8080/api/getChargingPoints
         "ampsDrawn": 23.7,
         "maxAmps": 128.0,
         "lifetimekWh": 1520,
-        "carsCharging": 1
+        "carsCharging": 2
     }
 }
 ```
@@ -120,5 +120,5 @@ Times are in seconds since the epoch (Unix time).
       TWC has not reported it.
 * `total` adds up every listed point: `ampsOffered`, `ampsDrawn` and `maxAmps`
   (a Gen2 TWC's own maximum amps for a Gen2 point). `lifetimekWh` sums the
-  Gen2 TWCs only, as only they report it. `carsCharging` is the number of cars
-  charging now, as [getStatus](../Control_HTTP.md) gives it.
+  Gen2 TWCs only, as only they report it. `carsCharging` is the number of listed
+  points drawing current now.
