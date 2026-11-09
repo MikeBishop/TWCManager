@@ -23,7 +23,7 @@
 - Today's text is the spec for every formatter (exact strings below). No layout or wording changes beyond what moving the formatting requires.
 - `format.js` and `live.js` are classic scripts defining one global each (`Format`, `Live`) and `module.exports` when `module` exists. No `.mjs`. No jQuery in either.
 - Scripts load per page in the templates that use them, not in `bootstrap.html.j2`.
-- JS tests: `tests/js/*.test.js`, CommonJS, run with `node --test tests/js/`. No package.json.
+- JS tests: `tests/js/*.test.js`, CommonJS, run with `node --test tests/js/*.test.js`. No package.json.
 - Polling: 3 s on both home pages, 5 s on Policy, Vehicles, Vehicle details; paused while `document.visibilityState === "hidden"`, immediate fetch on return.
 - User-facing docs describe capabilities, not internals; say "EVSE" or "charging station", never "charger", for the wall unit.
 - `/api/getSlaveTWCs` keeps its exact output.
@@ -147,7 +147,7 @@ test("duration matches str(timedelta) without microseconds", () => {
 
 - [ ] **Step 3: Run to verify failure**
 
-Run: `node --test tests/js/`
+Run: `node --test tests/js/*.test.js`
 Expected: FAIL, `Cannot find module .../format.js`.
 
 - [ ] **Step 4: Implement `format.js`**
@@ -167,7 +167,7 @@ Values copied from `HTTPControl.py:37-65` (`ageText`, `SOURCE_NAMES`) and `:132-
 
 - [ ] **Step 5: Run to verify pass**
 
-Run: `node --test tests/js/`
+Run: `node --test tests/js/*.test.js`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
@@ -651,14 +651,14 @@ Fill the two `/* ... */` bodies with the asserted strings named in them (from `t
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `node --test tests/js/`
+Run: `node --test tests/js/*.test.js`
 Expected: FAIL (`F.presence is not a function`, ...).
 
 - [ ] **Step 3: Implement the formatters**
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `node --test tests/js/`
+Run: `node --test tests/js/*.test.js`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -716,7 +716,7 @@ test("live.js never assigns innerHTML", () => {  // Review Focus 3
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `node --test tests/js/`
+Run: `node --test tests/js/*.test.js`
 Expected: FAIL, `Cannot find module .../live.js`.
 
 - [ ] **Step 3: Implement `live.js`; refactor `vehicleImage.js` to `drawVehicleImage`**
@@ -725,7 +725,7 @@ DOM code runs only when `typeof document !== "undefined"`. Elements are created 
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `node --test tests/js/`
+Run: `node --test tests/js/*.test.js`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -782,7 +782,7 @@ Expected: FAIL (`Live.start` missing; helpers still present).
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `pytest tests/unit/ -q && node --test tests/js/ && grep -rn "ageText\|providerLines\|carSpend\|pendingCommands\|PRESENCE_TEXT" lib/ || echo clean`
+Run: `pytest tests/unit/ -q && node --test tests/js/*.test.js && grep -rn "ageText\|providerLines\|carSpend\|pendingCommands\|PRESENCE_TEXT" lib/ || echo clean`
 Expected: PASS, `clean`.
 
 - [ ] **Step 5: Commit**
@@ -881,7 +881,7 @@ Expected: FAIL.
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `pytest tests/unit/ -q && node --test tests/js/`
+Run: `pytest tests/unit/ -q && node --test tests/js/*.test.js`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -918,7 +918,7 @@ def test_get_vehicle_unknown_is_404(api_get):
 
 - [ ] **Step 4: Full checks**
 
-Run: `pytest tests/unit/ -q && node --test tests/js/`
+Run: `pytest tests/unit/ -q && node --test tests/js/*.test.js`
 Expected: PASS.
 
 - [ ] **Step 5: Running-app check.** Start TWCManager with `etc/twcmanager/.testconfig.json` as the CI job does, then with Playwright load `/`, `/policy`, `/vehicles`, and a `/vehicleDetail/<VIN>` for a car added through the Add vehicle form. For each: no `.live-offline` notice after 4 s; at least one `[data-field]` non-empty; `/` lists the Dummy TWC; set `webControlTheme` to `Default` and repeat `/`. Then stop the server and confirm the notice appears within one interval. Run `pytest tests/integration/ -k "live_page or get_vehicle_unknown"` against it.
@@ -931,7 +931,7 @@ Expected: PASS.
         with:
           node-version: 'lts/*'
       - name: Run JavaScript tests
-        run: node --test tests/js/
+        run: node --test tests/js/*.test.js
 ```
 
 - [ ] **Step 7: Commit**
