@@ -79,3 +79,56 @@ test("live.js never writes form control state", () => {
   const src = fs.readFileSync(require.resolve("../../lib/TWCManager/Control/static/js/live.js"), "utf8");
   assert.doesNotMatch(src, /\.(value|checked|disabled)\s*=[^=]/);
 });
+
+function captureErrors(fn) {
+  const error = console.error, warn = console.warn;
+  const logged = [];
+  console.error = (...a) => logged.push(["error", String(a[0])]);
+  console.warn = (...a) => logged.push(["warn", String(a[0])]);
+  try {
+    fn();
+  } finally {
+    console.error = error;
+    console.warn = warn;
+  }
+  return logged;
+}
+
+test("guard swallows an exception and logs once per key until cleared", () => {
+  const logged = captureErrors(() => {
+    assert.equal(L._guard("g1", () => {}), true);
+    assert.equal(L._guard("g1", () => { throw new Error("x"); }), false);
+    assert.equal(L._guard("g1", () => { throw new Error("x"); }), false);
+    L._clearLog("g1");
+    assert.equal(L._guard("g1", () => { throw new Error("x"); }), false);
+  });
+  assert.equal(logged.length, 2);
+});
+
+test("logOnce re-arms only after clearLog", () => {
+  const logged = captureErrors(() => {
+    L._logOnce("update-test", "update failed");
+    L._logOnce("update-test", "update failed");
+    L._clearLog("update-test");
+    L._logOnce("update-test", "update failed");
+  });
+  assert.equal(logged.length, 2);
+});
+
+test("rowCells: rows, and null (leave rows alone) for unknown or throwing formatter even when empty", () => {
+  const F = require("../../lib/TWCManager/Control/static/js/format.js");
+  F.__testRow = (it) => [it.a, it.b];
+  F.__testRowThrows = () => { throw new Error("boom"); };
+  try {
+    captureErrors(() => {
+      assert.deepEqual(L._rowCells("__testRow", [{ a: "x", b: 1 }], {}), [["x", "1"]]);
+      assert.deepEqual(L._rowCells("__testRow", [], {}), []);
+      assert.equal(L._rowCells("__noSuchRow", [{ a: 1 }], {}), null);
+      assert.equal(L._rowCells("__noSuchRow", [], {}), null);
+      assert.equal(L._rowCells("__testRowThrows", [{ a: 1 }], {}), null);
+    });
+  } finally {
+    delete F.__testRow;
+    delete F.__testRowThrows;
+  }
+});
