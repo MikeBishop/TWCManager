@@ -230,7 +230,7 @@ wcmanager/settings.json and try saving your settings again.</b>
         <!-- Amps offered -->
         <div class="col-lg-1 col-md-3 col-2 text-center">
             <div class="row display-6 fw-light">
-                <span class="text-body me-1" data-field=".ampsOffered">0.0</span>
+                <span class="text-body me-1" data-field=".ampsOffered" data-format="round2">0.0</span>
             </div>
             <div class="row">
                 <span class="text-muted">Amps offered</span>
@@ -260,13 +260,13 @@ wcmanager/settings.json and try saving your settings again.</b>
         <!-- Phase/Voltage -->
         <div class="col-lg-auto pt-lg-0 col-md-4 pt-3 col-4 text-center">
             <div class="row">
-                <span class="text-muted">L<sub>1</sub> <span class="text-body me-1" data-field=".volts.0">230</span>V</span>
+                <span class="text-muted">L<sub>1</sub> <span class="text-body me-1" data-field=".volts.0" data-format="whole">230</span>V</span>
             </div>
             <div class="row">
-                <span class="text-muted">L<sub>2</sub> <span class="text-body me-1" data-field=".volts.1">230</span>V</span>
+                <span class="text-muted">L<sub>2</sub> <span class="text-body me-1" data-field=".volts.1" data-format="whole">230</span>V</span>
             </div>
             <div class="row">
-                <span class="text-muted">L<sub>3</sub> <span class="text-body me-1" data-field=".volts.2">230</span>V</span>
+                <span class="text-muted">L<sub>3</sub> <span class="text-body me-1" data-field=".volts.2" data-format="whole">230</span>V</span>
             </div>
             <div class="row">
                 <small class="text-muted">Phase/Voltage</small>
@@ -276,7 +276,7 @@ wcmanager/settings.json and try saving your settings again.</b>
         <!-- Vehicle/VIN -->
         <div class="col-lg-2 pt-lg-0 col-md-4 pt-3 col-4 text-muted">
             <div class="lh-sm">
-                <small>VIN: <span class='VINClick' data-field=".gen2.currentVIN" data-format="blank"></span></small>
+                <small>VIN: <span class='VINClick' data-field=".gen2.currentVIN" data-format="blank"></span><span class='VINClick' data-show=".gen2" data-show-if="not" data-field=".vin" data-format="blank"></span></small>
             </div>
             <div class="lh-sm">
                 <small>Last VIN: <span class='VINClick' data-field=".gen2.lastVIN" data-format="blank"></span></small>

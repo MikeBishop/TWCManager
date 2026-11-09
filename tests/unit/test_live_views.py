@@ -569,3 +569,16 @@ def test_home_hooks_match_the_apis(theme, mixed_master):
     src = open("lib/TWCManager/Control/static/js/format.js").read()
     for name in re.findall(r"data-(?:format|show-if)=['\"]([^'\"]+)['\"]", html):
         assert "F." + name + " = function" in src, name
+
+
+@pytest.mark.parametrize("theme", ["Default", "Modern"])
+def test_home_rounds_offered_and_names_the_car_without_a_twc(theme, mixed_master):
+    html = renderHome(mixed_master, theme)
+    assert 'data-field=".ampsOffered" data-format="round2"' in html
+    assert 'data-show=".gen2" data-show-if="not" data-field=".vin"' in html
+
+
+def test_default_max_amps_is_the_twcs_own_for_a_twc(mixed_master):
+    html = renderHome(mixed_master, "Default")
+    assert 'data-field=".gen2.maxAmps"' in html
+    assert 'data-show=".gen2" data-show-if="not" data-field=".maxAmps"' in html

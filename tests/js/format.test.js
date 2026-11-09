@@ -175,3 +175,15 @@ test("home", () => {
   assert.equal(F.surplusWatts(null, n) + " " + F.surplusUnit(null, n), "0 Watt");
   assert.equal(F.surplusAmps(null, n), "0.00");
 });
+
+test("round2 matches Python round(v, 2) as the old page showed it", () => {
+  assert.equal(F.round2(16.333333333333332), "16.33");
+  assert.equal(F.round2(16.0), "16");
+  assert.equal(F.round2(null), "");
+});
+
+test("whole rounds one voltage", () => {
+  assert.equal(F.whole(239.6), "240");
+  assert.equal(F.whole(230), "230");
+  assert.equal(F.whole(undefined), "");
+});

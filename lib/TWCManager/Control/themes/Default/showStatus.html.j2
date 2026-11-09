@@ -85,13 +85,13 @@
                 <td><span data-field=".controllers" data-format="pointKind"></span> <span data-field=".gen2.twcid" data-format="blank"></span></td>
                 <td><div data-field=".gen2.state" data-format="blank"></div></td>
                 <td><div data-field=".gen2.version" data-format="blank"></div></td>
-                <td><div data-field=".maxAmps"></div></td>
-                <td><div data-field=".ampsOffered"></div></td>
+                <td><div><span data-field=".gen2.maxAmps" data-format="blank"></span><span data-show=".gen2" data-show-if="not" data-field=".maxAmps"></span></div></td>
+                <td><div data-field=".ampsOffered" data-format="round2"></div></td>
                 <td><div data-field=".ampsDrawn"></div></td>
                 <td><div data-field=".gen2.lifetimekWh" data-format="blank"></div></td>
                 <td><span data-field=".volts" data-format="volts"></span></td>
                 <td><span data-show=".gen2"><span data-field=".gen2.lastHeardAt" data-format="secondsSince"></span> sec</span></td>
-                <td>C: <span class='VINClick' data-field=".gen2.currentVIN" data-format="blank"></span>
+                <td>C: <span class='VINClick' data-field=".gen2.currentVIN" data-format="blank"></span><span class='VINClick' data-show=".gen2" data-show-if="not" data-field=".vin" data-format="blank"></span>
                 <br />L: <span class='VINClick' data-field=".gen2.lastVIN" data-format="blank"></span></td>
                 <td>
                   <div class="dropdown">
