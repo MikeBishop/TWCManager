@@ -230,3 +230,12 @@ def test_forget_refuses_a_car_listed_after_the_check(monkeypatch):  # F7
     assert HTTPControl.forgetVehicle(m, TYPO) == "/vehicleDetail/" + TYPO
     assert m.vehicleRegistry.get(TYPO) is v and TYPO in m.settings["Vehicles"]
     assert v.attachment("TeslaAPI") is not None
+
+
+def test_live_row_tables_keep_a_gap_between_cells():
+    # live.js draws one cell per value, without the old &nbsp; spacer column
+    html = render(master())
+    for hook in ("vehicle.pending", "vehicle.spend.types", "vehicle.spend.fields"):
+        before = html[: html.index('data-list="%s"' % hook)]
+        assert before[before.rindex("<table") :].startswith('<table class="live-rows"')
+    assert "table.live-rows td + td" in html

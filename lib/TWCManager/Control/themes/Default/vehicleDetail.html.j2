@@ -3,6 +3,10 @@
   <head>
     <title>TWCManager</title>
     {% include 'bootstrap.html.j2' %}
+    <style>
+      /* The gap the server-drawn rows got from a &nbsp; spacer column */
+      table.live-rows td + td, table.live-rows th + th { padding-left: 0.75em; }
+    </style>
     <script type="text/javascript" src="/static/js/compositor.js"></script>
     <script type="text/javascript" src="/static/js/vehicleImage.js"></script>
     {% set vin = url.path.split("/")[2] %}
@@ -44,7 +48,7 @@
     {% endif %}
     <p>&nbsp;</p>
     <h3>Pending commands</h3>
-    <table>
+    <table class="live-rows">
       <tbody data-list="vehicle.pending" data-row="pendingRow"></tbody>
     </table>
     <p data-show="vehicle.pending" data-show-if="isEmpty" hidden>Nothing pending</p>
@@ -52,13 +56,13 @@
     <p>&nbsp;</p>
     <h3>Fleet spend</h3>
     <p data-field="vehicle" data-format="spendHeading" data-show="vehicle" data-show-if="spendHeading"></p>
-    <table data-show="vehicle.spend.types">
+    <table class="live-rows" data-show="vehicle.spend.types">
       <thead><tr><th>Request</th><th>Count</th><th>Cost</th><th>Last</th></tr></thead>
       <tbody data-list="vehicle.spend.types" data-row="spendTypeRow"></tbody>
     </table>
     <div data-show="vehicle" data-show-if="spendTelemetry">
     <p data-field="vehicle" data-format="spendTelemetry"></p>
-    <table>
+    <table class="live-rows">
       <thead><tr><th>Field</th><th>Signals</th></tr></thead>
       <tbody data-list="vehicle.spend.fields" data-row="fieldRow"></tbody>
     </table>
