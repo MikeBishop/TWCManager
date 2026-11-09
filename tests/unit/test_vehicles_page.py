@@ -101,18 +101,18 @@ def test_list_renders_registry_rows():
     assert f"/vehicleDetail/{VIN}" in html
     assert "Unknown car on TWC 8244" in html and "Charge history" in html
     assert 'action="/vehicle/add"' in html
-    assert f'data-field="vehicles.{VIN}.presence"' in html
+    assert 'data-field="vehicles.0.presence"' in html
     for th in ("Presence", "Watch", "Providers", "Last seen"):
         assert f"<th>{th}</th>" in html
-    assert 'data-field="vehicles.anon:8244.presence"' in html
-    assert f'data-field="vehicles.{VIN}.name"' in html
-    assert f'data-field="vehicles.{VIN}.watch" data-format="watchLine"' in html
-    assert f'data-field="vehicles.{VIN}" data-format="lastSeen"' in html
-    assert f'data-field="vehicles.{VIN}.heldLimit" data-format="heldLimit"' in html
-    providers = f'data-field="vehicles.{VIN}.providers" data-format="providerLines"'
+    assert 'data-field="vehicles.1.presence"' in html  # anon:8244, by position
+    assert 'data-field="vehicles.0.name"' in html
+    assert 'data-field="vehicles.0.watch" data-format="watchLine"' in html
+    assert 'data-field="vehicles.0" data-format="lastSeen"' in html
+    assert 'data-field="vehicles.0.heldLimit" data-format="heldLimit"' in html
+    providers = 'data-field="vehicles.0.providers" data-format="providerLines"'
     assert providers in html and "white-space: pre-line" in html
-    assert f'data-field="history.{VIN}.chargeSessions"' in html
-    assert f'data-field="history.{VIN}.totalkWh"' in html
+    assert 'data-field="history.0.chargeSessions"' in html
+    assert 'data-field="history.0.totalkWh"' in html
 
 
 def test_names_and_error_are_escaped():
@@ -257,7 +257,7 @@ def test_spend_lines_and_column_are_hooks():
     spending(m)
     html = render(m)
     assert "<th>Fleet this month</th>" in html
-    assert f'data-field="vehicles.{VIN}" data-format="spendCell"' in html
+    assert 'data-field="vehicles.0" data-format="spendCell"' in html
     assert 'data-field="spend" data-format="fleetLine" data-show="spend.fleet"' in html
     assert (
         'data-field="spend" data-format="telemetryLine" data-show="spend.telemetry"'

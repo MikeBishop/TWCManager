@@ -44,13 +44,13 @@
             {% if row.anonymous %}Unknown car on TWC {{ row.point }}
             {% else %}<a href="/vehicleDetail/{{ row.vin }}">{{ row.vin }}</a>{% endif %}
           </td>
-          <td data-label="Name" data-field="vehicles.{{ v.key }}.name"></td>
-          <td data-label="Presence" data-field="vehicles.{{ v.key }}.presence" data-format="presence"></td>
-          <td data-label="Watch" data-field="vehicles.{{ v.key }}.watch" data-format="watchLine"></td>
-          <td data-label="Providers" data-field="vehicles.{{ v.key }}.providers" data-format="providerLines" style="white-space: pre-line"></td>
-          <td data-label="Last seen" data-field="vehicles.{{ v.key }}" data-format="lastSeen"></td>
-          <td data-label="Charge limit (car's own)" data-field="vehicles.{{ v.key }}.heldLimit" data-format="heldLimit"></td>
-          {% if spend %}<td data-label="Fleet this month" data-field="vehicles.{{ v.key }}" data-format="spendCell"></td>{% endif %}
+          <td data-label="Name" data-field="vehicles.{{ loop.index0 }}.name"></td>
+          <td data-label="Presence" data-field="vehicles.{{ loop.index0 }}.presence" data-format="presence"></td>
+          <td data-label="Watch" data-field="vehicles.{{ loop.index0 }}.watch" data-format="watchLine"></td>
+          <td data-label="Providers" data-field="vehicles.{{ loop.index0 }}.providers" data-format="providerLines" style="white-space: pre-line"></td>
+          <td data-label="Last seen" data-field="vehicles.{{ loop.index0 }}" data-format="lastSeen"></td>
+          <td data-label="Charge limit (car's own)" data-field="vehicles.{{ loop.index0 }}.heldLimit" data-format="heldLimit"></td>
+          {% if spend %}<td data-label="Fleet this month" data-field="vehicles.{{ loop.index0 }}" data-format="spendCell"></td>{% endif %}
         </tr>
       {% endfor %}
     </table>
@@ -76,8 +76,8 @@
         {% for vehicle in master.settings["Vehicles"].keys()|sort %}
             <tr>
               <td data-label="VIN"><a href="/vehicleDetail/{{ vehicle }}">{{ vehicle }}</a></td>
-              <td data-label="Charges" data-field="history.{{ vehicle }}.chargeSessions"></td>
-              <td data-label="Total kWh" data-field="history.{{ vehicle }}.totalkWh"></td>
+              <td data-label="Charges" data-field="history.{{ loop.index0 }}.chargeSessions"></td>
+              <td data-label="Total kWh" data-field="history.{{ loop.index0 }}.totalkWh"></td>
             </tr>
         {% endfor %}
       {% endif %}

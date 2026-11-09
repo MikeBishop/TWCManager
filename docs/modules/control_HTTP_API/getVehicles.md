@@ -54,12 +54,13 @@ curl -X GET -d "" http://192.168.1.1:8080/api/getVehicles
             "spend": null
         }
     ],
-    "history": {
-        "5YJ3E1EA1KF000001": {
+    "history": [
+        {
+            "key": "5YJ3E1EA1KF000001",
             "chargeSessions": 0,
             "totalkWh": 0
         }
-    }
+    ]
 }
 ```
 
@@ -112,5 +113,5 @@ Times are in seconds since the epoch (Unix time).
           car, and `fields` breaks them down by field, most first: each has its
           `field` and `count`.
         * `last` gives the car's totals last month, as `api` and `telemetry`.
-* `history` gives the charge sessions and total kWh charged here of each
-  vehicle that has charge history, keyed by VIN.
+* `history` lists each vehicle that has charge history, in VIN order: its
+  `key` (the VIN), the charge sessions, and the total kWh charged here.

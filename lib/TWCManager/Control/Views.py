@@ -140,13 +140,16 @@ def _settingsShape(master):
         groups = sorted(master.settings.get("VehicleGroups", {}))
         history = master.settings.get("Vehicles", {})
         historyKeys = sorted(history)
-        rows = {
-            k: {
+        # A list in VIN order, so the page addresses rows by position: a
+        # settings key may hold a "." that a hook path cannot
+        rows = [
+            {
+                "key": k,
                 "chargeSessions": history[k].get("chargeSessions", 0),
                 "totalkWh": history[k].get("totalkWh", 0),
             }
             for k in historyKeys
-        }
+        ]
     return groups, historyKeys, rows
 
 
