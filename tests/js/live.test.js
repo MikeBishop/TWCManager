@@ -51,7 +51,7 @@ test("callFormat: no name, unknown name and throwing formatter", () => {
   console.error = (...a) => logged.push(["error", a.join(" ")]);
   try {
     assert.deepEqual(L._callFormat("", 5, {}), { ok: true, formatted: false });
-    assert.deepEqual(L._callFormat("count", 41800, {}), { ok: true, formatted: true, value: "41,800" });
+    assert.deepEqual(L._callFormat("thousands", 41800, {}), { ok: true, formatted: true, value: "41,800" });
     assert.deepEqual(L._callFormat("noSuchFormatter", 5, {}), { ok: true, formatted: false });
     assert.deepEqual(L._callFormat("noSuchFormatter", 5, {}), { ok: true, formatted: false });
     assert.equal(logged.filter((l) => l[0] === "warn").length, 1); // warned once

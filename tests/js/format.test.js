@@ -27,7 +27,7 @@ test("usd keeps a third decimal below one cent", () => {
   assert.equal(F.usd(0.31), "$0.31");
 });
 
-test("count", () => assert.equal(F.count(41800), "41,800"));
+test("thousands", () => assert.equal(F.thousands(41800), "41,800"));
 
 test("pyStr matches Python str() for JSON values", () => {
   assert.equal(F.pyStr(true), "True");
