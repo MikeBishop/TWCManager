@@ -163,7 +163,7 @@ test("home", () => {
   assert.equal(F.volts([240, 0, 0]), "240 / 0 / 0");
   assert.equal(F.fixed2(null), "0.00");
   assert.equal(F.secondsSince(now - 1.234, ctx()), "1.23");
-  assert.equal(F.pluralS([1, 2]), "s"); assert.equal(F.pluralS([1]), "");
+  assert.equal(F.pluralS([1, 2]), "s"); assert.equal(F.pluralS([1]), ""); assert.equal(F.pluralS([]), "s");
   assert.equal(F.scheduledStart(null, ctx({ scheduledChargingStartHour: 22, scheduledChargingFlexStart: 21 })), "22(Flex 21)");
   assert.equal(F.scheduledStart(null, ctx({ scheduledChargingStartHour: 22, scheduledChargingFlexStart: 22 })), "22");
   assert.equal(F.powerValue(1500) + " " + F.powerUnit(1500), "1.50 kW");

@@ -726,6 +726,12 @@ def test_home_hides_gen2_only_labels_on_other_points(theme, label, mixed_master)
     assert ".gen2" in _showsOf(renderHome(mixed_master, theme), label)
 
 
+def test_modern_home_says_when_there_are_no_charge_points(mixed_master):
+    html = renderHome(mixed_master, "Modern")
+    assert _showsOf(html, "None yet") == ["points"]
+    assert 'data-show="points" data-show-if="not"' in html
+
+
 def test_default_max_amps_is_the_twcs_own_for_a_twc(mixed_master):
     html = renderHome(mixed_master, "Default")
     assert 'data-field=".gen2.maxAmps"' in html
