@@ -680,6 +680,52 @@ def test_home_rounds_offered_and_names_the_car_without_a_twc(theme, mixed_master
     assert 'data-show=".gen2" data-show-if="not" data-field=".vin"' in html
 
 
+def _showsOf(html, label):
+    # The data-show values of every element enclosing the first text node
+    # that starts with label
+    from html.parser import HTMLParser
+
+    VOID = {"br", "img", "input", "meta", "link", "hr", "source", "wbr"}
+
+    class Find(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack, self.found = [], None
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in VOID:
+                self.stack.append((tag, dict(attrs).get("data-show")))
+
+        def handle_endtag(self, tag):
+            if tag in VOID or tag not in (t for t, _ in self.stack):
+                return
+            while self.stack.pop()[0] != tag:
+                pass
+
+        def handle_data(self, text):
+            if self.found is None and text.strip().startswith(label):
+                self.found = [show for _, show in self.stack if show]
+
+    parser = Find()
+    parser.feed(html)
+    assert parser.found is not None, label
+    return parser.found
+
+
+@pytest.mark.parametrize(
+    "theme, label",
+    [
+        ("Modern", "Charge time"),
+        ("Modern", "Lifetime kWh"),
+        ("Modern", "Last VIN"),
+        ("Default", "L:"),
+    ],
+)
+def test_home_hides_gen2_only_labels_on_other_points(theme, label, mixed_master):
+    # Only a Gen2 TWC reports these; on any other point they'd be blank
+    assert ".gen2" in _showsOf(renderHome(mixed_master, theme), label)
+
+
 def test_default_max_amps_is_the_twcs_own_for_a_twc(mixed_master):
     html = renderHome(mixed_master, "Default")
     assert 'data-field=".gen2.maxAmps"' in html
