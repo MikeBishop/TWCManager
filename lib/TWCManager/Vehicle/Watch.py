@@ -205,15 +205,30 @@ class Watch:
             and any(True for _ in self._watched())
         )
 
-    def chargingAmps(self) -> float:
+    def _homeCharging(self):
         # Cars charging at home on chargers that report to no TWC, watched or
         # covered by a feed: a TWC naming a car counts its draw itself
-        return sum(
-            v.value("actualCurrent") or 0
+        return [
+            v
             for v in self.master.vehicleRegistry.vehicles()
             if not v.isAnonymous
             and twcVinAt(self.master, v) <= NEVER
             and situation(self.master, v) == HOME_CHARGING
+        ]
+
+    def chargingAmps(self) -> float:
+        return sum(v.value("actualCurrent") or 0 for v in self._homeCharging())
+
+    def chargingWatts(self) -> float:
+        # Each car at its own voltage and phases: a 120 V mobile connector
+        # draws half the watts per amp of a 240 V TWC
+        from TWCManager.EVSEInstance.VehicleEndpoint import vehicleVoltage
+
+        config = self.master.config.get("config", {})
+        return sum(
+            (v.value("actualCurrent") or 0)
+            * sum(x for x in vehicleVoltage(v, config) if x > 0)
+            for v in self._homeCharging()
         )
 
     def unexplainedWatts(self) -> float:
